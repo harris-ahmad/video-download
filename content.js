@@ -1,24 +1,91 @@
 const blobDataCache = new Map();
+let dynamicVideosCache = [];
 
 function detectVideos() {
   const videos = [];
   const seenUrls = new Set();
-  const videoElements = document.querySelectorAll("video");
 
-  videoElements.forEach(video => {
-      if (video.src) {
-          addVideo(video.src, video);
-      }
+  scanDocument(document, seenUrls, videos);
+  scanIframes(seenUrls, videos);
+  scanShadowRoots(document.body, seenUrls, videos);
 
-      const sources = video.querySelectorAll("source");
-      sources.forEach(source => {
-          if (source.src) {
-              addVideo(source.src, video);
+  return videos;
+
+  function scanDocument(doc, seenUrls, videos) {
+      const videoElements = doc.querySelectorAll("video");
+
+      videoElements.forEach(video => {
+          if (video.src) {
+              addVideo(video.src, video, seenUrls, videos);
+          }
+
+          const sources = video.querySelectorAll("source");
+          sources.forEach(source => {
+              if (source.src) {
+                  addVideo(source.src, video, seenUrls, videos);
+              }
+          });
+      });
+  }
+
+  function scanIframes(seenUrls, videos) {
+      const iframes = document.querySelectorAll('iframe');
+
+      iframes.forEach(iframe => {
+          try {
+              if (iframe.contentDocument) {
+                  scanDocument(iframe.contentDocument, seenUrls, videos);
+
+                  if (iframe.contentDocument.body) {
+                      scanShadowRoots(iframe.contentDocument.body, seenUrls, videos);
+                  }
+              }
+          } catch (e) {
+              // Cross-origin iframe, can't access
           }
       });
-  });
+  }
 
-  function addVideo(url, videoElement) {
+  function scanShadowRoots(root, seenUrls, videos) {
+      if (!root) return;
+
+      const walker = document.createTreeWalker(
+          root,
+          NodeFilter.SHOW_ELEMENT,
+          null,
+          false
+      );
+
+      const elementsWithShadow = [];
+      let node;
+
+      while (node = walker.nextNode()) {
+          if (node.shadowRoot) {
+              elementsWithShadow.push(node);
+          }
+      }
+
+      elementsWithShadow.forEach(element => {
+          const shadowVideos = element.shadowRoot.querySelectorAll('video');
+
+          shadowVideos.forEach(video => {
+              if (video.src) {
+                  addVideo(video.src, video, seenUrls, videos);
+              }
+
+              const sources = video.querySelectorAll('source');
+              sources.forEach(source => {
+                  if (source.src) {
+                      addVideo(source.src, video, seenUrls, videos);
+                  }
+              });
+          });
+
+          scanShadowRoots(element.shadowRoot, seenUrls, videos);
+      });
+  }
+
+  function addVideo(url, videoElement, seenUrls, videos) {
       if (seenUrls.has(url)) return;
       seenUrls.add(url);
 
@@ -51,10 +118,8 @@ function detectVideos() {
   function getVideoType(url) {
       const urlLower = url.toLowerCase();
 
-      // Blob URLs are special, check first
       if (urlLower.startsWith('blob:')) return 'blob';
 
-      // Extract pathname for accurate detection
       let pathname;
       try {
           const urlObj = new URL(url);
@@ -72,8 +137,119 @@ function detectVideos() {
 
       return 'unknown';
   }
+}
 
-  return videos;
+function setupDynamicObserver() {
+  const observer = new MutationObserver((mutations) => {
+      mutations.forEach(mutation => {
+          mutation.addedNodes.forEach(node => {
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                  if (node.tagName === 'VIDEO') {
+                      handleNewVideo(node);
+                  }
+
+                  const videos = node.querySelectorAll && node.querySelectorAll('video');
+                  if (videos && videos.length > 0) {
+                      videos.forEach(video => handleNewVideo(video));
+                  }
+
+                  if (node.tagName === 'IFRAME') {
+                      setTimeout(() => {
+                          try {
+                              if (node.contentDocument) {
+                                  const iframeVideos = node.contentDocument.querySelectorAll('video');
+                                  iframeVideos.forEach(video => handleNewVideo(video));
+                              }
+                          } catch (e) {
+                              // Cross-origin
+                          }
+                      }, 1000);
+                  }
+
+                  if (node.shadowRoot) {
+                      const shadowVideos = node.shadowRoot.querySelectorAll('video');
+                      shadowVideos.forEach(video => handleNewVideo(video));
+                  }
+              }
+          });
+      });
+  });
+
+  observer.observe(document.body, {
+      childList: true,
+      subtree: true
+  });
+
+  function handleNewVideo(videoElement) {
+      const urls = [];
+
+      if (videoElement.src) {
+          urls.push(videoElement.src);
+      }
+
+      const sources = videoElement.querySelectorAll('source');
+      sources.forEach(source => {
+          if (source.src) {
+              urls.push(source.src);
+          }
+      });
+
+      urls.forEach(url => {
+          if (!dynamicVideosCache.some(v => v.src === url)) {
+              const videoData = {
+                  src: url,
+                  type: getVideoType(url),
+                  width: videoElement.videoWidth || videoElement.clientWidth || null,
+                  height: videoElement.videoHeight || videoElement.clientHeight || null,
+                  duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null,
+                  dynamic: true
+              };
+
+              dynamicVideosCache.push(videoData);
+
+              if (videoData.type === 'blob') {
+                  videoData.blobCaptured = false;
+                  captureBlobData(url, videoElement).then(dataUrl => {
+                      if (dataUrl) {
+                          blobDataCache.set(url, dataUrl);
+                          videoData.blobCaptured = true;
+                      }
+                  }).catch(error => {
+                      console.warn('Failed to capture blob:', error);
+                  });
+              }
+          }
+      });
+  }
+
+  function getVideoType(url) {
+      const urlLower = url.toLowerCase();
+
+      if (urlLower.startsWith('blob:')) return 'blob';
+
+      let pathname;
+      try {
+          const urlObj = new URL(url);
+          pathname = urlObj.pathname.toLowerCase();
+      } catch {
+          pathname = url.split('?')[0].toLowerCase();
+      }
+
+      if (pathname.endsWith('.mp4')) return 'mp4';
+      if (pathname.endsWith('.webm')) return 'webm';
+      if (pathname.endsWith('.m3u8')) return 'hls';
+      if (pathname.endsWith('.mpd')) return 'dash';
+      if (pathname.endsWith('.ogg')) return 'ogg';
+      if (pathname.endsWith('.mov')) return 'mov';
+
+      return 'unknown';
+  }
+}
+
+if (document.body) {
+  setupDynamicObserver();
+} else {
+  document.addEventListener('DOMContentLoaded', setupDynamicObserver);
 }
 
 async function captureBlobData(blobUrl, videoElement) {
@@ -173,6 +349,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "getVideos") {
       try {
           const videos = detectVideos();
+
+          dynamicVideosCache.forEach(dynamicVideo => {
+              if (!videos.some(v => v.src === dynamicVideo.src)) {
+                  videos.push(dynamicVideo);
+              }
+          });
+
           sendResponse({videos: videos});
       } catch (error) {
           console.error('Detection failed:', error);
