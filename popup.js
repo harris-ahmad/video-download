@@ -1,5 +1,3 @@
-// popup.js - Handles UI logic and orchestrates video detection
-
 const loadingEl = document.getElementById('loading');
 const emptyStateEl = document.getElementById('empty-state');
 const errorStateEl = document.getElementById('error-state');
@@ -11,6 +9,12 @@ const modalClose = document.querySelector('.modal-close');
 const downloadQueueEl = document.getElementById('download-queue');
 const queueItemsEl = document.getElementById('queue-items');
 const clearQueueBtn = document.getElementById('clear-queue');
+
+const tabButtons = document.querySelectorAll('.tab-btn');
+const networkListEl = document.getElementById('network-list');
+const networkEmptyEl = document.getElementById('network-empty');
+const clearNetworkBtn = document.getElementById('clear-network');
+const networkFilterEl = document.getElementById('network-filter');
 
 let settings = {
   defaultQuality: 'best',
@@ -29,8 +33,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateQueueDisplay();
   setInterval(updateQueueDisplay, 1000);
 
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+
   refreshBtn.addEventListener('click', () => {
-    scanForVideos();
+    const activeTab = document.querySelector('.tab-btn.active').dataset.tab;
+    if (activeTab === 'videos') {
+      scanForVideos();
+    } else {
+      loadNetworkMonitor();
+    }
   });
 
   modalClose.addEventListener('click', () => {
@@ -47,6 +60,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     queueItemsEl.innerHTML = '';
     downloadQueueEl.classList.add('hidden');
   });
+
+  clearNetworkBtn.addEventListener('click', async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    chrome.runtime.sendMessage({ action: 'clearNetworkRequests', tabId: tab.id });
+    networkListEl.innerHTML = '';
+    networkListEl.classList.add('hidden');
+    networkEmptyEl.classList.remove('hidden');
+  });
+
+  networkFilterEl.addEventListener('change', () => {
+    loadNetworkMonitor();
+  });
 });
 
 async function loadSettings() {
@@ -59,6 +84,130 @@ async function loadSettings() {
 /**
  * Main function to scan for videos from both content script and background
  */
+function switchTab(tabName) {
+  tabButtons.forEach(btn => {
+    if (btn.dataset.tab === tabName) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+
+  document.querySelectorAll('.tab-content').forEach(content => {
+    content.classList.remove('active');
+  });
+
+  if (tabName === 'videos') {
+    document.getElementById('videos-tab').classList.add('active');
+  } else if (tabName === 'network') {
+    document.getElementById('network-tab').classList.add('active');
+    loadNetworkMonitor();
+  }
+}
+
+async function loadNetworkMonitor() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    chrome.runtime.sendMessage(
+      { action: 'getNetworkRequests', tabId: tab.id },
+      (response) => {
+        if (response && response.requests) {
+          displayNetworkRequests(response.requests);
+        }
+      }
+    );
+  } catch (error) {
+    console.error('Failed to load network requests:', error);
+  }
+}
+
+function displayNetworkRequests(requests) {
+  const filter = networkFilterEl.value;
+
+  let filteredRequests = requests;
+  if (filter === 'video') {
+    filteredRequests = requests.filter(r => r.type === 'video');
+  } else if (filter === 'audio') {
+    filteredRequests = requests.filter(r => r.type === 'audio');
+  }
+
+  if (filteredRequests.length === 0) {
+    networkListEl.classList.add('hidden');
+    networkEmptyEl.classList.remove('hidden');
+    return;
+  }
+
+  networkEmptyEl.classList.add('hidden');
+  networkListEl.classList.remove('hidden');
+  networkListEl.innerHTML = '';
+
+  filteredRequests.reverse().forEach(request => {
+    const item = document.createElement('div');
+    item.className = 'network-item';
+
+    const header = document.createElement('div');
+    header.className = 'network-item-header';
+
+    const typeSpan = document.createElement('span');
+    typeSpan.className = `network-type ${request.type}`;
+    typeSpan.textContent = request.type;
+
+    const sizeSpan = document.createElement('span');
+    sizeSpan.className = 'network-size';
+    if (request.size) {
+      sizeSpan.textContent = formatFileSize(request.size);
+    } else {
+      sizeSpan.textContent = 'Size unknown';
+    }
+
+    header.appendChild(typeSpan);
+    header.appendChild(sizeSpan);
+
+    const urlDiv = document.createElement('div');
+    urlDiv.className = 'network-url';
+    urlDiv.textContent = request.url;
+    urlDiv.title = request.url;
+
+    const actions = document.createElement('div');
+    actions.className = 'network-actions';
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'network-download-btn';
+    downloadBtn.textContent = 'Download';
+    downloadBtn.addEventListener('click', () => {
+      chrome.downloads.download({ url: request.url, saveAs: settings.saveAs });
+    });
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'network-copy-btn';
+    copyBtn.textContent = 'Copy URL';
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(request.url);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy URL';
+      }, 1500);
+    });
+
+    actions.appendChild(downloadBtn);
+    actions.appendChild(copyBtn);
+
+    item.appendChild(header);
+    item.appendChild(urlDiv);
+    item.appendChild(actions);
+
+    networkListEl.appendChild(item);
+  });
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
 async function scanForVideos() {
   showState('loading');
   console.log('Starting video scan...');

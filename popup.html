@@ -18,39 +18,73 @@
       </button>
     </div>
 
-    <!-- Loading State -->
-    <div id="loading" class="loading">
-      <div class="spinner"></div>
-      <p>Scanning for videos...</p>
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="videos">Videos</button>
+      <button class="tab-btn" data-tab="network">Network Monitor</button>
     </div>
 
-    <!-- Error State -->
-    <div id="error-state" class="error-state hidden">
-      <p>⚠️ Cannot access this page</p>
-      <small>This extension cannot run on Chrome internal pages</small>
-    </div>
-
-    <!-- Empty State -->
-    <div id="empty-state" class="empty-state hidden">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polygon points="23 7 16 12 23 17 23 7"></polygon>
-        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-      </svg>
-      <p>No videos detected on this page</p>
-      <small>Try playing a video first, then click refresh</small>
-    </div>
-
-    <!-- Video List -->
-    <div id="video-list" class="video-list hidden">
-    </div>
-
-    <!-- Download Queue -->
-    <div id="download-queue" class="download-queue hidden">
-      <div class="queue-header">
-        <h3>Downloads</h3>
-        <button id="clear-queue">Clear</button>
+    <!-- Videos Tab -->
+    <div id="videos-tab" class="tab-content active">
+      <!-- Loading State -->
+      <div id="loading" class="loading">
+        <div class="spinner"></div>
+        <p>Scanning for videos...</p>
       </div>
-      <div id="queue-items" class="queue-items">
+
+      <!-- Error State -->
+      <div id="error-state" class="error-state hidden">
+        <p>⚠️ Cannot access this page</p>
+        <small>This extension cannot run on Chrome internal pages</small>
+      </div>
+
+      <!-- Empty State -->
+      <div id="empty-state" class="empty-state hidden">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="23 7 16 12 23 17 23 7"></polygon>
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+        </svg>
+        <p>No videos detected on this page</p>
+        <small>Try playing a video first, then click refresh</small>
+      </div>
+
+      <!-- Video List -->
+      <div id="video-list" class="video-list hidden">
+      </div>
+
+      <!-- Download Queue -->
+      <div id="download-queue" class="download-queue hidden">
+        <div class="queue-header">
+          <h3>Downloads</h3>
+          <button id="clear-queue">Clear</button>
+        </div>
+        <div id="queue-items" class="queue-items">
+        </div>
+      </div>
+    </div>
+
+    <!-- Network Monitor Tab -->
+    <div id="network-tab" class="tab-content hidden">
+      <div class="network-controls">
+        <button id="clear-network">Clear</button>
+        <select id="network-filter">
+          <option value="all">All Media</option>
+          <option value="video">Video Only</option>
+          <option value="audio">Audio Only</option>
+        </select>
+      </div>
+
+      <div id="network-empty" class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+        <p>No network requests detected</p>
+        <small>Media requests will appear here in real-time</small>
+      </div>
+
+      <div id="network-list" class="network-list hidden">
       </div>
     </div>
   </div>
