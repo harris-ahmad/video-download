@@ -12,8 +12,34 @@ async function downloadHLS(manifestUrl, onProgress) {
     const manifestResponse = await fetch(manifestUrl);
     const manifestText = await manifestResponse.text();
 
-    // Step 2: Parse the manifest to get segment URLs
-    const segmentUrls = parseM3U8(manifestText, manifestUrl);
+    // Step 2: Check if this is a master playlist
+    const parseResult = parseM3U8(manifestText, manifestUrl);
+
+    let segmentUrls;
+    if (parseResult.isMasterPlaylist) {
+      // This is a master playlist - fetch the best variant playlist
+      console.log(`Master playlist detected with ${parseResult.variants.length} variants`);
+
+      // Select the best quality variant (last one is usually highest quality)
+      const selectedVariant = parseResult.variants[parseResult.variants.length - 1];
+      console.log('Fetching variant playlist:', selectedVariant.url);
+
+      // Fetch the variant playlist
+      const variantResponse = await fetch(selectedVariant.url);
+      const variantText = await variantResponse.text();
+
+      // Parse the variant playlist to get actual segments
+      const variantResult = parseM3U8(variantText, selectedVariant.url);
+
+      if (variantResult.isMasterPlaylist) {
+        throw new Error('Nested master playlists are not supported');
+      }
+
+      segmentUrls = variantResult.segments;
+    } else {
+      // Direct playlist with segments
+      segmentUrls = parseResult.segments;
+    }
 
     if (segmentUrls.length === 0) {
       throw new Error('No video segments found in manifest');
@@ -49,48 +75,77 @@ async function downloadHLS(manifestUrl, onProgress) {
 }
 
 /**
- * Parses an m3u8 manifest file to extract segment URLs
+ * Parses an m3u8 manifest file to extract segment URLs or variant playlists
  * @param {string} manifestText - The m3u8 file content
  * @param {string} baseUrl - Base URL for resolving relative paths
- * @returns {Array<string>} - Array of segment URLs
+ * @returns {Object} - { isMasterPlaylist: boolean, segments?: Array, variants?: Array }
  */
 function parseM3U8(manifestText, baseUrl) {
   const lines = manifestText.split('\n').map(line => line.trim());
-  const segmentUrls = [];
 
   // Get base URL for resolving relative paths
   const urlObj = new URL(baseUrl);
   const basePath = urlObj.origin + urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  // Check if this is a master playlist (contains #EXT-X-STREAM-INF)
+  const isMasterPlaylist = manifestText.includes('#EXT-X-STREAM-INF');
 
-    // Skip comments and empty lines
-    if (!line || line.startsWith('#')) {
-      // Check if this is a master playlist pointing to another m3u8
-      if (line.includes('#EXT-X-STREAM-INF')) {
-        // This is a master playlist, we need the variant playlist URL
-        // The next non-comment line is the variant playlist
+  if (isMasterPlaylist) {
+    // Parse variant playlists from master playlist
+    const variants = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      if (line.startsWith('#EXT-X-STREAM-INF')) {
+        // Extract bandwidth/quality info
+        const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+        const bandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1]) : 0;
+
+        const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+        const resolution = resolutionMatch ? resolutionMatch[1] : 'unknown';
+
+        // Next non-comment line is the variant URL
         for (let j = i + 1; j < lines.length; j++) {
           if (lines[j] && !lines[j].startsWith('#')) {
             const variantUrl = resolveUrl(lines[j], basePath);
-            // For simplicity, just use the first variant (could be improved to select quality)
-            console.log('Master playlist detected, fetching variant:', variantUrl);
-            // This is a recursive case - we'd need to fetch this URL
-            // For now, just return empty and let the user know
-            throw new Error('Master playlist detected - please use a direct variant playlist URL');
+            variants.push({
+              url: variantUrl,
+              bandwidth: bandwidth,
+              resolution: resolution
+            });
+            break;
           }
         }
       }
-      continue;
     }
 
-    // This is a segment URL
-    const segmentUrl = resolveUrl(line, basePath);
-    segmentUrls.push(segmentUrl);
-  }
+    return {
+      isMasterPlaylist: true,
+      variants: variants
+    };
+  } else {
+    // Parse segment URLs from variant playlist
+    const segmentUrls = [];
 
-  return segmentUrls;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Skip comments and empty lines
+      if (!line || line.startsWith('#')) {
+        continue;
+      }
+
+      // This is a segment URL
+      const segmentUrl = resolveUrl(line, basePath);
+      segmentUrls.push(segmentUrl);
+    }
+
+    return {
+      isMasterPlaylist: false,
+      segments: segmentUrls
+    };
+  }
 }
 
 /**

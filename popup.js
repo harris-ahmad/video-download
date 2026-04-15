@@ -289,7 +289,7 @@ async function downloadHLSVideo(manifestUrl, button) {
     console.error('HLS download error:', error);
     button.textContent = '✗ Failed';
     button.className = 'download-btn error';
-    alert(`HLS download failed: ${error.message}\n\nTip: Some HLS streams use master playlists. Try opening the .m3u8 URL in a new tab and looking for variant playlist URLs.`);
+    alert(`HLS download failed: ${error.message}\n\nNote: The extension attempts to download the highest quality variant automatically. Some streams may be protected by CORS or DRM.`);
   } finally {
     setTimeout(() => {
       button.textContent = originalText;
