@@ -181,13 +181,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
-    if (request.action === "clearNetworkRequests") {
-        const tabId = request.tabId;
-        networkRequests.set(tabId, []);
-        sendResponse({success: true});
-        return true;
-    }
-
     if (request.action === "startDownload") {
         const downloadId = ++downloadIdCounter;
         const download = {

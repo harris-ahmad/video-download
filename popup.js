@@ -20,6 +20,7 @@ const videosBadgeEl = document.getElementById('videos-badge');
 const networkBadgeEl = document.getElementById('network-badge');
 
 let networkRefreshInterval = null;
+let networkHidden = false;
 
 let settings = {
   defaultQuality: 'best',
@@ -47,6 +48,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (activeTab === 'videos') {
       scanForVideos();
     } else {
+      networkHidden = false;
       loadNetworkMonitor();
     }
   });
@@ -68,19 +70,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  clearNetworkBtn.addEventListener('click', async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    chrome.runtime.sendMessage({ action: 'clearNetworkRequests', tabId: tab.id });
+  clearNetworkBtn.addEventListener('click', () => {
+    networkHidden = true;
     networkListEl.innerHTML = '';
     networkListEl.classList.add('hidden');
     networkEmptyEl.classList.remove('hidden');
+    networkBadgeEl.classList.add('hidden');
   });
 
   networkFilterEl.addEventListener('change', () => {
+    networkHidden = false;
     loadNetworkMonitor();
   });
 
   sizeFilterEl.addEventListener('change', () => {
+    networkHidden = false;
     loadNetworkMonitor();
   });
 });
@@ -122,18 +126,23 @@ function switchTab(tabName) {
     const networkTab = document.getElementById('network-tab');
     networkTab.classList.add('active');
     networkTab.classList.remove('hidden');
+    networkHidden = false;
     loadNetworkMonitor();
     networkRefreshInterval = setInterval(loadNetworkMonitor, 2000);
   }
 }
 
 async function loadNetworkMonitor() {
+  if (networkHidden) return;
+
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     chrome.runtime.sendMessage(
       { action: 'getNetworkRequests', tabId: tab.id },
       (response) => {
+        if (networkHidden) return;
+
         if (response && response.requests) {
           displayNetworkRequests(response.requests);
         } else {
@@ -143,7 +152,9 @@ async function loadNetworkMonitor() {
     );
   } catch (error) {
     console.error('Failed to load network requests:', error);
-    displayNetworkRequests([]);
+    if (!networkHidden) {
+      displayNetworkRequests([]);
+    }
   }
 }
 
