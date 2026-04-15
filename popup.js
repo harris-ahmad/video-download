@@ -57,8 +57,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   clearQueueBtn.addEventListener('click', () => {
-    queueItemsEl.innerHTML = '';
-    downloadQueueEl.classList.add('hidden');
+    chrome.runtime.sendMessage({ action: 'clearQueue' }, () => {
+      queueItemsEl.innerHTML = '';
+      downloadQueueEl.classList.add('hidden');
+    });
   });
 
   clearNetworkBtn.addEventListener('click', async () => {

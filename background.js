@@ -231,6 +231,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({success: true});
         return true;
     }
+
+    if (request.action === "clearQueue") {
+        downloadQueue.clear();
+        sendResponse({success: true});
+        return true;
+    }
 });
 
 function monitorDownload(downloadId, chromeDownloadId) {
