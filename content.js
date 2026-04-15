@@ -26,6 +26,46 @@ window.addEventListener('pageshow', () => {
   checkForNavigation();
 });
 
+// Check if current page is YouTube homepage or feed
+function isYouTubeHomepage() {
+  const url = location.href;
+  const hostname = location.hostname;
+
+  // Check if it's YouTube domain
+  if (!hostname.includes('youtube.com')) {
+    return false;
+  }
+
+  // Homepage patterns
+  const homepagePatterns = [
+    /^https?:\/\/(www\.)?youtube\.com\/?$/,           // youtube.com or youtube.com/
+    /^https?:\/\/(www\.)?youtube\.com\/feed/,         // youtube.com/feed/*
+    /^https?:\/\/(www\.)?youtube\.com\/\?/,           // youtube.com/?...
+    /^https?:\/\/(www\.)?youtube\.com\/#/,            // youtube.com/#...
+    /^https?:\/\/(www\.)?youtube\.com\/results/,      // youtube.com/results (search results)
+    /^https?:\/\/(www\.)?youtube\.com\/trending/,     // youtube.com/trending
+  ];
+
+  // If URL matches any homepage pattern, return true
+  for (const pattern of homepagePatterns) {
+    if (pattern.test(url)) {
+      console.log('[Video Filter] On homepage/feed - filtering enabled');
+      return true;
+    }
+  }
+
+  // Check if on video watch page (watch page should always allow all videos)
+  const isWatchPage = url.includes('/watch');
+  if (isWatchPage) {
+    console.log('[Video Filter] On watch page - showing all videos');
+    return false;
+  }
+
+  // Other YouTube pages (channels, playlists, etc.) - enable filtering
+  console.log('[Video Filter] On other YouTube page - filtering enabled');
+  return true;
+}
+
 function detectVideos() {
   const videos = [];
   const seenUrls = new Set();
@@ -114,6 +154,15 @@ function detectVideos() {
       if (seenUrls.has(url)) return;
       seenUrls.add(url);
 
+      const duration = videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null;
+
+      // Filter short preview videos on homepage/feed pages only
+      const isHomepageOrFeed = isYouTubeHomepage();
+      if (isHomepageOrFeed && duration !== null && duration < 15) {
+          console.log('Skipping short preview video on homepage:', url, 'duration:', duration);
+          return;
+      }
+
       const type = getVideoType(url);
 
       const videoData = {
@@ -121,7 +170,7 @@ function detectVideos() {
           type: type,
           width: videoElement.videoWidth || videoElement.clientWidth || null,
           height: videoElement.videoHeight || videoElement.clientHeight || null,
-          duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null,
+          duration: duration,
           thumbnail: captureThumbnail(videoElement)
       };
 
