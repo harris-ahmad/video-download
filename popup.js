@@ -16,6 +16,8 @@ const networkEmptyEl = document.getElementById('network-empty');
 const clearNetworkBtn = document.getElementById('clear-network');
 const networkFilterEl = document.getElementById('network-filter');
 
+let networkRefreshInterval = null;
+
 let settings = {
   defaultQuality: 'best',
   saveAs: true,
@@ -97,13 +99,24 @@ function switchTab(tabName) {
 
   document.querySelectorAll('.tab-content').forEach(content => {
     content.classList.remove('active');
+    content.classList.add('hidden');
   });
 
+  if (networkRefreshInterval) {
+    clearInterval(networkRefreshInterval);
+    networkRefreshInterval = null;
+  }
+
   if (tabName === 'videos') {
-    document.getElementById('videos-tab').classList.add('active');
+    const videosTab = document.getElementById('videos-tab');
+    videosTab.classList.add('active');
+    videosTab.classList.remove('hidden');
   } else if (tabName === 'network') {
-    document.getElementById('network-tab').classList.add('active');
+    const networkTab = document.getElementById('network-tab');
+    networkTab.classList.add('active');
+    networkTab.classList.remove('hidden');
     loadNetworkMonitor();
+    networkRefreshInterval = setInterval(loadNetworkMonitor, 2000);
   }
 }
 
@@ -114,93 +127,123 @@ async function loadNetworkMonitor() {
     chrome.runtime.sendMessage(
       { action: 'getNetworkRequests', tabId: tab.id },
       (response) => {
+        console.log('Network requests received:', response);
         if (response && response.requests) {
+          console.log('Total requests:', response.requests.length);
           displayNetworkRequests(response.requests);
+        } else {
+          displayNetworkRequests([]);
         }
       }
     );
   } catch (error) {
     console.error('Failed to load network requests:', error);
+    displayNetworkRequests([]);
   }
 }
 
 function displayNetworkRequests(requests) {
-  const filter = networkFilterEl.value;
+  try {
+    console.log('displayNetworkRequests called with:', requests);
+    console.log('networkFilterEl:', networkFilterEl);
 
-  let filteredRequests = requests;
-  if (filter === 'video') {
-    filteredRequests = requests.filter(r => r.type === 'video');
-  } else if (filter === 'audio') {
-    filteredRequests = requests.filter(r => r.type === 'audio');
-  }
-
-  if (filteredRequests.length === 0) {
-    networkListEl.classList.add('hidden');
-    networkEmptyEl.classList.remove('hidden');
-    return;
-  }
-
-  networkEmptyEl.classList.add('hidden');
-  networkListEl.classList.remove('hidden');
-  networkListEl.innerHTML = '';
-
-  filteredRequests.reverse().forEach(request => {
-    const item = document.createElement('div');
-    item.className = 'network-item';
-
-    const header = document.createElement('div');
-    header.className = 'network-item-header';
-
-    const typeSpan = document.createElement('span');
-    typeSpan.className = `network-type ${request.type}`;
-    typeSpan.textContent = request.type;
-
-    const sizeSpan = document.createElement('span');
-    sizeSpan.className = 'network-size';
-    if (request.size) {
-      sizeSpan.textContent = formatFileSize(request.size);
-    } else {
-      sizeSpan.textContent = 'Size unknown';
+    if (!networkFilterEl) {
+      console.error('networkFilterEl is null!');
+      return;
     }
 
-    header.appendChild(typeSpan);
-    header.appendChild(sizeSpan);
+    const filter = networkFilterEl.value;
+    console.log('Current filter:', filter);
 
-    const urlDiv = document.createElement('div');
-    urlDiv.className = 'network-url';
-    urlDiv.textContent = request.url;
-    urlDiv.title = request.url;
+    let filteredRequests = requests;
+    if (filter === 'video') {
+      filteredRequests = requests.filter(r => r.type === 'video');
+    } else if (filter === 'audio') {
+      filteredRequests = requests.filter(r => r.type === 'audio');
+    }
 
-    const actions = document.createElement('div');
-    actions.className = 'network-actions';
+    console.log('Filtered requests:', filteredRequests);
+    console.log('Length check:', filteredRequests.length === 0);
 
-    const downloadBtn = document.createElement('button');
-    downloadBtn.className = 'network-download-btn';
-    downloadBtn.textContent = 'Download';
-    downloadBtn.addEventListener('click', () => {
-      chrome.downloads.download({ url: request.url, saveAs: settings.saveAs });
+    if (filteredRequests.length === 0) {
+      console.log('No requests to display, showing empty state');
+      networkListEl.classList.add('hidden');
+      networkEmptyEl.classList.remove('hidden');
+      return;
+    }
+
+    console.log('Displaying', filteredRequests.length, 'requests');
+    console.log('networkEmptyEl:', networkEmptyEl);
+    console.log('networkListEl:', networkListEl);
+
+    networkEmptyEl.classList.add('hidden');
+    networkListEl.classList.remove('hidden');
+    networkListEl.innerHTML = '';
+
+    console.log('About to iterate through requests...');
+    filteredRequests.reverse().forEach((request, idx) => {
+      console.log(`Creating item ${idx}:`, request);
+      const item = document.createElement('div');
+      item.className = 'network-item';
+
+      const header = document.createElement('div');
+      header.className = 'network-item-header';
+
+      const typeSpan = document.createElement('span');
+      typeSpan.className = `network-type ${request.type}`;
+      typeSpan.textContent = request.type;
+
+      const sizeSpan = document.createElement('span');
+      sizeSpan.className = 'network-size';
+      if (request.size) {
+        sizeSpan.textContent = formatFileSize(request.size);
+      } else {
+        sizeSpan.textContent = 'Size unknown';
+      }
+
+      header.appendChild(typeSpan);
+      header.appendChild(sizeSpan);
+
+      const urlDiv = document.createElement('div');
+      urlDiv.className = 'network-url';
+      urlDiv.textContent = request.url;
+      urlDiv.title = request.url;
+
+      const actions = document.createElement('div');
+      actions.className = 'network-actions';
+
+      const downloadBtn = document.createElement('button');
+      downloadBtn.className = 'network-download-btn';
+      downloadBtn.textContent = 'Download';
+      downloadBtn.addEventListener('click', () => {
+        chrome.downloads.download({ url: request.url, saveAs: settings.saveAs });
+      });
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'network-copy-btn';
+      copyBtn.textContent = 'Copy URL';
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(request.url);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => {
+          copyBtn.textContent = 'Copy URL';
+        }, 1500);
+      });
+
+      actions.appendChild(downloadBtn);
+      actions.appendChild(copyBtn);
+
+      item.appendChild(header);
+      item.appendChild(urlDiv);
+      item.appendChild(actions);
+
+      console.log(`Appending item ${idx} to networkListEl`);
+      networkListEl.appendChild(item);
+      console.log('networkListEl children count:', networkListEl.children.length);
     });
-
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'network-copy-btn';
-    copyBtn.textContent = 'Copy URL';
-    copyBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(request.url);
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => {
-        copyBtn.textContent = 'Copy URL';
-      }, 1500);
-    });
-
-    actions.appendChild(downloadBtn);
-    actions.appendChild(copyBtn);
-
-    item.appendChild(header);
-    item.appendChild(urlDiv);
-    item.appendChild(actions);
-
-    networkListEl.appendChild(item);
-  });
+  } catch (error) {
+    console.error('Error in displayNetworkRequests:', error);
+  }
 }
 
 function formatFileSize(bytes) {
