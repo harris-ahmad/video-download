@@ -1,73 +1,118 @@
 // popup.js - Handles UI logic and orchestrates video detection
 
-// DOM elements
 const loadingEl = document.getElementById('loading');
 const emptyStateEl = document.getElementById('empty-state');
 const errorStateEl = document.getElementById('error-state');
 const videoListEl = document.getElementById('video-list');
 const refreshBtn = document.getElementById('refresh-btn');
+const qualityModal = document.getElementById('quality-modal');
+const qualityOptionsEl = document.getElementById('quality-options');
+const modalClose = document.querySelector('.modal-close');
+const downloadQueueEl = document.getElementById('download-queue');
+const queueItemsEl = document.getElementById('queue-items');
+const clearQueueBtn = document.getElementById('clear-queue');
 
-// Initialize on popup open
-document.addEventListener('DOMContentLoaded', () => {
+let settings = {
+  defaultQuality: 'best',
+  saveAs: true,
+  autoDownload: false,
+  minDuration: 0,
+  minResolution: 0,
+  theme: 'dark',
+  maxConcurrent: 3,
+  networkDetection: true
+};
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadSettings();
   scanForVideos();
+  updateQueueDisplay();
+  setInterval(updateQueueDisplay, 1000);
 
-  // Refresh button handler
   refreshBtn.addEventListener('click', () => {
     scanForVideos();
   });
+
+  modalClose.addEventListener('click', () => {
+    qualityModal.classList.add('hidden');
+  });
+
+  qualityModal.addEventListener('click', (e) => {
+    if (e.target === qualityModal) {
+      qualityModal.classList.add('hidden');
+    }
+  });
+
+  clearQueueBtn.addEventListener('click', () => {
+    queueItemsEl.innerHTML = '';
+    downloadQueueEl.classList.add('hidden');
+  });
 });
+
+async function loadSettings() {
+  const stored = await chrome.storage.sync.get('settings');
+  if (stored.settings) {
+    settings = stored.settings;
+  }
+}
 
 /**
  * Main function to scan for videos from both content script and background
  */
 async function scanForVideos() {
-  // Show loading state
   showState('loading');
+  console.log('Starting video scan...');
 
   try {
-    // Get the current active tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    console.log('Active tab:', tab?.url);
 
     if (!tab || !tab.id) {
+      console.error('No active tab found');
       showState('error');
       return;
     }
 
-    // Check if we can access this page (chrome:// pages are restricted)
     if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+      console.warn('Cannot access chrome:// pages');
       showState('error');
       return;
     }
 
-    // Get videos from content script (DOM videos)
     let contentVideos = [];
     try {
-      const contentResponse = await chrome.tabs.sendMessage(tab.id, { action: 'getVideos' });
+      console.log('Requesting videos from content script...');
+      const contentResponse = await Promise.race([
+        chrome.tabs.sendMessage(tab.id, { action: 'getVideos' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+      ]);
       contentVideos = contentResponse.videos || [];
+      console.log('Content script found:', contentVideos.length, 'videos');
     } catch (error) {
-      console.warn('Could not get videos from content script:', error);
-      // Content script might not be injected yet, continue anyway
+      console.warn('Could not get videos from content script:', error.message);
     }
 
-    // Get videos from background script (network intercepted videos)
     let networkVideos = [];
     try {
+      console.log('Requesting videos from background...');
       const networkResponse = await chrome.runtime.sendMessage({
         action: 'getNetworkVideos',
         tabId: tab.id
       });
       networkVideos = networkResponse.videos || [];
+      console.log('Background found:', networkVideos.length, 'videos');
     } catch (error) {
-      console.warn('Could not get videos from background:', error);
+      console.warn('Could not get videos from background:', error.message);
     }
 
-    // Merge and deduplicate videos by URL
     const allVideos = mergeVideos(contentVideos, networkVideos);
+    console.log('Total videos after merge:', allVideos.length);
 
-    // Display results
     if (allVideos.length === 0) {
+      console.log('No videos found, showing empty state');
       showState('empty');
     } else {
+      console.log('Displaying', allVideos.length, 'videos');
       displayVideos(allVideos);
       showState('videos');
     }
@@ -77,26 +122,34 @@ async function scanForVideos() {
   }
 }
 
-/**
- * Merges videos from content and network, removes duplicates by URL
- * Prefers content script data (has better metadata)
- */
 function mergeVideos(contentVideos, networkVideos) {
   const videoMap = new Map();
 
-  // Add content videos first (they have better metadata)
   contentVideos.forEach(video => {
-    videoMap.set(video.src, video);
+    if (passesFilters(video)) {
+      videoMap.set(video.src, video);
+    }
   });
 
-  // Add network videos only if URL not already seen
   networkVideos.forEach(video => {
-    if (!videoMap.has(video.src)) {
+    if (!videoMap.has(video.src) && passesFilters(video)) {
       videoMap.set(video.src, video);
     }
   });
 
   return Array.from(videoMap.values());
+}
+
+function passesFilters(video) {
+  if (settings.minDuration > 0 && video.duration) {
+    if (video.duration < settings.minDuration) return false;
+  }
+
+  if (settings.minResolution > 0 && video.height) {
+    if (video.height < settings.minResolution) return false;
+  }
+
+  return true;
 }
 
 /**
@@ -146,17 +199,24 @@ function createVideoCard(video, index) {
     durationDiv.textContent = '⏱️ Unknown';
   }
 
-  // URL (truncated with tooltip)
   const urlDiv = document.createElement('div');
   urlDiv.className = 'video-url';
   urlDiv.textContent = truncateUrl(video.src);
-  urlDiv.title = video.src; // Full URL on hover
+  urlDiv.title = video.src;
 
   infoDiv.appendChild(resolutionDiv);
   infoDiv.appendChild(durationDiv);
+
+  if (video.type === 'blob' && video.blobCaptured === false) {
+    const warningDiv = document.createElement('div');
+    warningDiv.className = 'video-meta';
+    warningDiv.style.color = '#FF8C42';
+    warningDiv.textContent = '⚡ Click button to capture';
+    infoDiv.appendChild(warningDiv);
+  }
+
   infoDiv.appendChild(urlDiv);
 
-  // Download button
   const downloadBtn = createDownloadButton(video);
 
   // Assemble card
@@ -184,9 +244,14 @@ function createDownloadButton(video) {
     btn.textContent = 'Download';
     btn.addEventListener('click', () => downloadDASHVideo(video.src, btn));
   } else if (video.type === 'blob') {
-    // Blob URLs need special handling
-    btn.textContent = 'Download';
-    btn.addEventListener('click', () => downloadBlob(video.src, btn));
+    if (video.blobCaptured) {
+      btn.textContent = 'Download';
+      btn.addEventListener('click', () => downloadBlob(video.src, btn, video));
+    } else {
+      btn.textContent = 'Capture & Download';
+      btn.style.background = '#FF8C42';
+      btn.addEventListener('click', () => captureBlobNow(video.src, btn));
+    }
   } else {
     // Direct download for mp4, webm, ogg, mov, unknown
     btn.textContent = 'Download';
@@ -199,60 +264,170 @@ function createDownloadButton(video) {
 /**
  * Downloads a blob URL by fetching it from content script
  */
-async function downloadBlob(blobUrl, button) {
+async function captureBlobNow(blobUrl, button) {
+  const durationInput = prompt(
+    'How many seconds to record?\n\n' +
+    'Enter duration (default: 60 seconds)\n' +
+    'Note: Very long recordings (>10 min) may cause memory issues',
+    '60'
+  );
+
+  if (durationInput === null) return;
+
+  const duration = Math.max(parseInt(durationInput) || 60, 1);
+
+  const recordFromStart = confirm(
+    `Will record ${duration} seconds.\n\n` +
+    '✓ Yes - Record from beginning\n' +
+    '✗ No - Record from current position'
+  );
+
+  button.textContent = recordFromStart ? 'Rewinding...' : 'Starting...';
+  button.disabled = true;
+  button.classList.add('recording');
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    let elapsed = 0;
+    const countdownInterval = setInterval(() => {
+      elapsed++;
+      button.textContent = `Recording ${elapsed}/${duration}s`;
+    }, 1000);
+
+    try {
+      const response = await Promise.race([
+        chrome.tabs.sendMessage(tab.id, {
+          action: 'forceCapture',
+          url: blobUrl,
+          recordFromStart: recordFromStart,
+          duration: duration
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Recording timeout')), (duration + 10) * 1000))
+      ]);
+
+      clearInterval(countdownInterval);
+
+      if (response.success) {
+        button.textContent = 'Processing...';
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+        const filename = `recorded-video-${timestamp}.webm`;
+
+        await chrome.downloads.download({
+          url: response.dataUrl,
+          filename: filename,
+          saveAs: settings.saveAs
+        });
+
+        button.textContent = '✓ Recorded';
+        button.style.background = '#2ECC71';
+
+        setTimeout(() => {
+          alert('Video recorded successfully!\n\n✓ Saved as: ' + filename + '\n\n✓ Duration: ' + duration + ' seconds\n\nNote: The video is in WebM format. If you need MP4, you can convert it using HandBrake or FFmpeg.');
+        }, 500);
+      } else {
+        throw new Error(response.error);
+      }
+    } catch (innerError) {
+      clearInterval(countdownInterval);
+      throw innerError;
+    }
+  } catch (error) {
+    console.error('Capture failed:', error);
+    button.textContent = '✗ Failed';
+    button.className = 'download-btn error';
+
+    let errorMsg = 'Failed to record video.\n\n';
+    if (error.message === 'Recording timeout') {
+      errorMsg += 'Recording timed out. Try:\n';
+      errorMsg += '• Shorter duration\n';
+      errorMsg += '• Ensure video is playing\n\n';
+    } else {
+      errorMsg += 'Common issues:\n';
+      errorMsg += '• Video must be playing (not paused)\n';
+      errorMsg += '• Some sites use DRM protection\n';
+      errorMsg += '• Browser may block recording\n\n';
+    }
+    errorMsg += 'Alternative: Try right-clicking video → "Save video as"';
+
+    alert(errorMsg);
+  } finally {
+    button.classList.remove('recording');
+    setTimeout(() => {
+      button.textContent = 'Capture & Download';
+      button.disabled = false;
+      button.className = 'download-btn';
+      button.style.background = '#FF8C42';
+    }, 3000);
+  }
+}
+
+async function downloadBlob(blobUrl, button, video) {
   button.textContent = 'Downloading...';
   button.disabled = true;
 
   try {
-    // Get active tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    // Ask content script to convert blob to data URL
     const response = await chrome.tabs.sendMessage(tab.id, {
       action: 'downloadBlob',
       url: blobUrl
     });
 
     if (response.success) {
-      // Download the data URL
       const filename = generateFilename('blob', 'video');
       await chrome.downloads.download({
         url: response.dataUrl,
         filename: filename,
-        saveAs: true
+        saveAs: settings.saveAs
       });
-      button.textContent = '✓ Downloaded';
+      button.textContent = '✓ Done';
     } else {
       throw new Error(response.error);
     }
   } catch (error) {
     console.error('Blob download error:', error);
-    button.textContent = '✗ Failed';
+    button.textContent = '✗ Expired';
     button.className = 'download-btn error';
+
+    let errorMsg = 'Blob URL has expired.\n\n';
+
+    if (video && !video.blobCaptured) {
+      errorMsg += 'The blob was detected but could not be captured in time.\n\n';
+    }
+
+    errorMsg += 'Tips:\n';
+    errorMsg += '• Refresh the page and try downloading immediately\n';
+    errorMsg += '• Try right-clicking the video → "Save video as"\n';
+    errorMsg += '• Some sites intentionally block blob downloads';
+
+    alert(errorMsg);
   } finally {
     setTimeout(() => {
       button.textContent = 'Download';
       button.disabled = false;
       button.className = 'download-btn';
-    }, 2000);
+    }, 3000);
   }
 }
 
-/**
- * Downloads a video using direct URL
- */
 async function downloadDirect(url, button) {
-  button.textContent = 'Downloading...';
+  button.textContent = 'Starting...';
   button.disabled = true;
 
   try {
     const filename = generateFilename(url, 'video');
-    await chrome.downloads.download({
+    const response = await chrome.runtime.sendMessage({
+      action: 'startDownload',
       url: url,
       filename: filename,
-      saveAs: true
+      saveAs: settings.saveAs
     });
-    button.textContent = '✓ Downloaded';
+
+    if (response.downloadId) {
+      button.textContent = '✓ Queued';
+    }
   } catch (error) {
     console.error('Download error:', error);
     button.textContent = '✗ Failed';
@@ -266,33 +441,82 @@ async function downloadDirect(url, button) {
   }
 }
 
-/**
- * Downloads an HLS video (m3u8) by fetching and concatenating segments
- */
 async function downloadHLSVideo(manifestUrl, button) {
-  const originalText = button.textContent;
-  button.textContent = 'Preparing...';
+  button.textContent = 'Loading...';
   button.disabled = true;
 
   try {
-    // Download HLS segments with progress callback
-    const videoBlob = await downloadHLS(manifestUrl, (current, total) => {
-      button.textContent = `Downloading ${current}/${total}`;
+    const variants = await getHLSVariants(manifestUrl);
+
+    button.textContent = 'Download';
+    button.disabled = false;
+
+    if (settings.defaultQuality === 'ask' || variants.length === 1) {
+      showQualitySelector(variants, (selectedVariant) => {
+        startHLSDownload(selectedVariant, manifestUrl, button);
+      });
+    } else {
+      const selectedVariant = selectQualityByPreference(variants, settings.defaultQuality);
+      startHLSDownload(selectedVariant, manifestUrl, button);
+    }
+  } catch (error) {
+    console.error('Failed to load variants:', error);
+    button.textContent = 'Download';
+    button.disabled = false;
+    alert(`Failed to load quality options: ${error.message}`);
+  }
+}
+
+function selectQualityByPreference(variants, preference) {
+  if (preference === 'best') {
+    return variants[variants.length - 1];
+  }
+  if (preference === 'low') {
+    return variants[0];
+  }
+
+  const resolutionMap = {
+    'high': 1080,
+    'medium': 720
+  };
+
+  const targetHeight = resolutionMap[preference];
+  if (!targetHeight) return variants[variants.length - 1];
+
+  let best = variants[0];
+  let bestDiff = Infinity;
+
+  variants.forEach(v => {
+    const height = parseInt(v.resolution?.split('x')[1] || '0');
+    const diff = Math.abs(height - targetHeight);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = v;
+    }
+  });
+
+  return best;
+}
+
+async function startHLSDownload(variant, manifestUrl, button) {
+  button.textContent = 'Downloading...';
+  button.disabled = true;
+
+  try {
+    const videoBlob = await downloadHLSWithQuality(variant.url, (current, total) => {
+      button.textContent = `${current}/${total}`;
     });
 
-    // Trigger download
     const filename = generateFilename(manifestUrl, 'hls-video') + '.ts';
     triggerBlobDownload(videoBlob, filename);
-
-    button.textContent = '✓ Downloaded';
+    button.textContent = '✓ Done';
   } catch (error) {
-    console.error('HLS download error:', error);
+    console.error('Download failed:', error);
     button.textContent = '✗ Failed';
     button.className = 'download-btn error';
-    alert(`HLS download failed: ${error.message}\n\nNote: The extension attempts to download the highest quality variant automatically. Some streams may be protected by CORS or DRM.`);
   } finally {
     setTimeout(() => {
-      button.textContent = originalText;
+      button.textContent = 'Download';
       button.disabled = false;
       button.className = 'download-btn';
     }, 2000);
@@ -332,9 +556,54 @@ async function downloadDASHVideo(manifestUrl, button) {
   }
 }
 
-/**
- * Generates a filename from URL or type
- */
+function showQualitySelector(variants, onSelect) {
+  qualityOptionsEl.innerHTML = '';
+
+  variants.forEach((variant) => {
+    const option = document.createElement('div');
+    option.className = 'quality-option';
+
+    const info = document.createElement('div');
+    info.className = 'quality-info';
+
+    const label = document.createElement('div');
+    label.className = 'quality-label';
+    label.textContent = variant.label;
+
+    const details = document.createElement('div');
+    details.className = 'quality-details';
+    const bandwidth = variant.bandwidth ? `${(variant.bandwidth / 1000000).toFixed(1)} Mbps` : 'Unknown bitrate';
+    details.textContent = bandwidth;
+
+    info.appendChild(label);
+    info.appendChild(details);
+
+    const badge = document.createElement('div');
+    badge.className = 'quality-badge';
+    if (variant.isBest) {
+      badge.classList.add('best');
+      badge.textContent = 'Best';
+    } else if (variant.isLow) {
+      badge.classList.add('low');
+      badge.textContent = 'Low';
+    } else {
+      badge.textContent = 'Mid';
+    }
+
+    option.appendChild(info);
+    option.appendChild(badge);
+
+    option.addEventListener('click', () => {
+      qualityModal.classList.add('hidden');
+      onSelect(variant);
+    });
+
+    qualityOptionsEl.appendChild(option);
+  });
+
+  qualityModal.classList.remove('hidden');
+}
+
 function generateFilename(url, fallback) {
   try {
     const urlObj = new URL(url);
@@ -373,17 +642,12 @@ function truncateUrl(url) {
   return '...' + url.slice(-60);
 }
 
-/**
- * Shows the appropriate UI state
- */
 function showState(state) {
-  // Hide all states
   loadingEl.classList.add('hidden');
   emptyStateEl.classList.add('hidden');
   errorStateEl.classList.add('hidden');
   videoListEl.classList.add('hidden');
 
-  // Show requested state
   switch (state) {
     case 'loading':
       loadingEl.classList.remove('hidden');
@@ -397,5 +661,59 @@ function showState(state) {
     case 'videos':
       videoListEl.classList.remove('hidden');
       break;
+  }
+}
+
+async function updateQueueDisplay() {
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getQueueStatus' });
+    const queue = response.queue || [];
+
+    if (queue.length === 0) {
+      downloadQueueEl.classList.add('hidden');
+      return;
+    }
+
+    downloadQueueEl.classList.remove('hidden');
+    queueItemsEl.innerHTML = '';
+
+    queue.forEach(item => {
+      const queueItem = document.createElement('div');
+      queueItem.className = 'queue-item';
+
+      const header = document.createElement('div');
+      header.className = 'queue-item-header';
+
+      const filename = document.createElement('div');
+      filename.className = 'queue-filename';
+      filename.textContent = item.filename || 'Downloading...';
+      filename.title = item.filename;
+
+      const status = document.createElement('div');
+      status.className = `queue-status ${item.status}`;
+      status.textContent = item.status;
+
+      header.appendChild(filename);
+      header.appendChild(status);
+
+      queueItem.appendChild(header);
+
+      if (item.status === 'downloading' && item.total > 0) {
+        const progressBar = document.createElement('div');
+        progressBar.className = 'queue-progress-bar';
+
+        const progressFill = document.createElement('div');
+        progressFill.className = 'queue-progress-fill';
+        const percent = (item.progress / item.total) * 100;
+        progressFill.style.width = `${percent}%`;
+
+        progressBar.appendChild(progressFill);
+        queueItem.appendChild(progressBar);
+      }
+
+      queueItemsEl.appendChild(queueItem);
+    });
+  } catch (error) {
+    console.error('Failed to update queue:', error);
   }
 }

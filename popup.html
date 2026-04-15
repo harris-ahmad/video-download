@@ -42,7 +42,29 @@
 
     <!-- Video List -->
     <div id="video-list" class="video-list hidden">
-      <!-- Video cards will be dynamically inserted here by popup.js -->
+    </div>
+
+    <!-- Download Queue -->
+    <div id="download-queue" class="download-queue hidden">
+      <div class="queue-header">
+        <h3>Downloads</h3>
+        <button id="clear-queue">Clear</button>
+      </div>
+      <div id="queue-items" class="queue-items">
+      </div>
+    </div>
+  </div>
+
+  <div id="quality-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Select Quality</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="quality-options" class="quality-options">
+        </div>
+      </div>
     </div>
   </div>
 

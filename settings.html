@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Detector Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div class="settings-container">
+    <header>
+      <h1>Video Detector Settings</h1>
+      <p>Configure your download preferences</p>
+    </header>
+
+    <main>
+      <section class="setting-section">
+        <h2>Download Quality</h2>
+        <div class="setting-item">
+          <label for="default-quality">Default Quality Preference</label>
+          <select id="default-quality">
+            <option value="best">Best Available</option>
+            <option value="high">High (1080p)</option>
+            <option value="medium">Medium (720p)</option>
+            <option value="low">Low (480p)</option>
+            <option value="ask">Always Ask</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="setting-section">
+        <h2>Download Behavior</h2>
+        <div class="setting-item">
+          <label>
+            <input type="checkbox" id="save-as">
+            Always show save dialog
+          </label>
+        </div>
+        <div class="setting-item">
+          <label>
+            <input type="checkbox" id="auto-download">
+            Auto-download single videos
+          </label>
+        </div>
+      </section>
+
+      <section class="setting-section">
+        <h2>Detection</h2>
+        <div class="setting-item">
+          <label for="min-duration">Minimum video duration (seconds)</label>
+          <input type="number" id="min-duration" min="0" value="0">
+        </div>
+        <div class="setting-item">
+          <label for="min-resolution">Minimum resolution height (pixels)</label>
+          <input type="number" id="min-resolution" min="0" value="0">
+        </div>
+      </section>
+
+      <section class="setting-section">
+        <h2>Appearance</h2>
+        <div class="setting-item">
+          <label for="theme">Theme</label>
+          <select id="theme">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="auto">Auto</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="setting-section">
+        <h2>Advanced</h2>
+        <div class="setting-item">
+          <label for="max-concurrent">Max concurrent downloads</label>
+          <input type="number" id="max-concurrent" min="1" max="10" value="3">
+        </div>
+        <div class="setting-item">
+          <label>
+            <input type="checkbox" id="network-detection">
+            Enable network request detection
+          </label>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <button id="save-settings" class="primary-btn">Save Settings</button>
+      <button id="reset-settings" class="secondary-btn">Reset to Defaults</button>
+      <div id="save-status" class="save-status hidden"></div>
+    </footer>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

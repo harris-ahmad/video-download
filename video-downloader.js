@@ -226,19 +226,64 @@ function parseMPD(xmlDoc, baseUrl) {
   return segmentUrls;
 }
 
-/**
- * Resolves a URL (absolute or relative) against a base URL
- * @param {string} url - URL to resolve
- * @param {string} baseUrl - Base URL
- * @returns {string} - Resolved absolute URL
- */
+async function getHLSVariants(manifestUrl) {
+  const manifestResponse = await fetch(manifestUrl);
+  const manifestText = await manifestResponse.text();
+  const parseResult = parseM3U8(manifestText, manifestUrl);
+
+  if (parseResult.isMasterPlaylist) {
+    return parseResult.variants.map((v, i) => ({
+      ...v,
+      label: v.resolution || `Variant ${i + 1}`,
+      isBest: i === parseResult.variants.length - 1,
+      isLow: i === 0
+    }));
+  }
+
+  return [{
+    url: manifestUrl,
+    label: 'Original',
+    bandwidth: 0,
+    resolution: 'unknown',
+    isBest: true,
+    isLow: false
+  }];
+}
+
+async function downloadHLSWithQuality(variantUrl, onProgress) {
+  const variantResponse = await fetch(variantUrl);
+  const variantText = await variantResponse.text();
+  const variantResult = parseM3U8(variantText, variantUrl);
+
+  const segmentUrls = variantResult.segments;
+
+  if (!segmentUrls || segmentUrls.length === 0) {
+    throw new Error('No segments found');
+  }
+
+  const segments = [];
+  for (let i = 0; i < segmentUrls.length; i++) {
+    if (onProgress) {
+      onProgress(i + 1, segmentUrls.length);
+    }
+
+    try {
+      const segmentResponse = await fetch(segmentUrls[i]);
+      const segmentBlob = await segmentResponse.blob();
+      segments.push(segmentBlob);
+    } catch (error) {
+      console.warn(`Segment ${i + 1} failed:`, error);
+    }
+  }
+
+  return new Blob(segments, { type: 'video/mp2t' });
+}
+
 function resolveUrl(url, baseUrl) {
-  // If already absolute, return as-is
   if (url.startsWith('http://') || url.startsWith('https://')) {
     return url;
   }
 
-  // Handle relative URLs
   try {
     return new URL(url, baseUrl).href;
   } catch (error) {

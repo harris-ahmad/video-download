@@ -83,6 +83,9 @@ chrome.webNavigation.onBeforeNavigate.addListener(details => {
     if (frameId===0) networkVideos.delete(tabId);
 });
 
+const downloadQueue = new Map();
+let downloadIdCounter = 0;
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getNetworkVideos") {
         const tabId = request.tabId;
@@ -99,4 +102,79 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({videos: videos});
         return true;
     }
+
+    if (request.action === "startDownload") {
+        const downloadId = ++downloadIdCounter;
+        const download = {
+            id: downloadId,
+            url: request.url,
+            filename: request.filename,
+            status: 'downloading',
+            progress: 0,
+            total: 0
+        };
+
+        downloadQueue.set(downloadId, download);
+
+        chrome.downloads.download({
+            url: request.url,
+            filename: request.filename,
+            saveAs: request.saveAs || false
+        }, (chromeDownloadId) => {
+            if (chromeDownloadId) {
+                download.chromeDownloadId = chromeDownloadId;
+                monitorDownload(downloadId, chromeDownloadId);
+            }
+        });
+
+        sendResponse({downloadId: downloadId});
+        return true;
+    }
+
+    if (request.action === "getQueueStatus") {
+        const status = Array.from(downloadQueue.values());
+        sendResponse({queue: status});
+        return true;
+    }
+
+    if (request.action === "cancelDownload") {
+        const download = downloadQueue.get(request.downloadId);
+        if (download && download.chromeDownloadId) {
+            chrome.downloads.cancel(download.chromeDownloadId);
+            download.status = 'cancelled';
+        }
+        sendResponse({success: true});
+        return true;
+    }
 });
+
+function monitorDownload(downloadId, chromeDownloadId) {
+    const interval = setInterval(() => {
+        chrome.downloads.search({id: chromeDownloadId}, (results) => {
+            if (results.length === 0) {
+                clearInterval(interval);
+                return;
+            }
+
+            const item = results[0];
+            const download = downloadQueue.get(downloadId);
+
+            if (!download) {
+                clearInterval(interval);
+                return;
+            }
+
+            download.progress = item.bytesReceived;
+            download.total = item.totalBytes;
+
+            if (item.state === 'complete') {
+                download.status = 'completed';
+                clearInterval(interval);
+                setTimeout(() => downloadQueue.delete(downloadId), 5000);
+            } else if (item.state === 'interrupted') {
+                download.status = 'failed';
+                clearInterval(interval);
+            }
+        });
+    }, 500);
+}
