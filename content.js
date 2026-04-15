@@ -96,7 +96,8 @@ function detectVideos() {
           type: type,
           width: videoElement.videoWidth || videoElement.clientWidth || null,
           height: videoElement.videoHeight || videoElement.clientHeight || null,
-          duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null
+          duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null,
+          thumbnail: captureThumbnail(videoElement)
       };
 
       if (type === 'blob') {
@@ -202,7 +203,8 @@ function setupDynamicObserver() {
                   width: videoElement.videoWidth || videoElement.clientWidth || null,
                   height: videoElement.videoHeight || videoElement.clientHeight || null,
                   duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null,
-                  dynamic: true
+                  dynamic: true,
+                  thumbnail: captureThumbnail(videoElement)
               };
 
               dynamicVideosCache.push(videoData);
@@ -250,6 +252,29 @@ if (document.body) {
   setupDynamicObserver();
 } else {
   document.addEventListener('DOMContentLoaded', setupDynamicObserver);
+}
+
+function captureThumbnail(videoElement) {
+  try {
+    if (!videoElement || videoElement.readyState < 2) {
+      return null;
+    }
+
+    const canvas = document.createElement('canvas');
+    const width = videoElement.videoWidth || videoElement.clientWidth || 320;
+    const height = videoElement.videoHeight || videoElement.clientHeight || 180;
+
+    canvas.width = Math.min(width, 320);
+    canvas.height = Math.min(height, 180);
+
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+    return canvas.toDataURL('image/jpeg', 0.7);
+  } catch (error) {
+    console.warn('Failed to capture thumbnail:', error);
+    return null;
+  }
 }
 
 async function captureBlobData(blobUrl, videoElement) {

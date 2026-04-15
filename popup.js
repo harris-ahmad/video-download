@@ -338,6 +338,20 @@ async function scanForVideos() {
   }
 }
 
+function isAudioUrl(url) {
+  const audioExtensions = ['.mp3', '.aac', '.wav', '.flac', '.m4a', '.opus'];
+
+  let pathname;
+  try {
+    const urlObj = new URL(url);
+    pathname = urlObj.pathname.toLowerCase();
+  } catch {
+    pathname = url.split('?')[0].toLowerCase();
+  }
+
+  return audioExtensions.some(ext => pathname.endsWith(ext));
+}
+
 function mergeVideos(contentVideos, networkVideos) {
   const videoMap = new Map();
 
@@ -348,7 +362,8 @@ function mergeVideos(contentVideos, networkVideos) {
   });
 
   networkVideos.forEach(video => {
-    if (!videoMap.has(video.src) && passesFilters(video)) {
+    // Filter out audio files - they should only appear in Network Monitor
+    if (!videoMap.has(video.src) && passesFilters(video) && !isAudioUrl(video.src)) {
       videoMap.set(video.src, video);
     }
   });
@@ -393,6 +408,19 @@ function displayVideos(videos) {
 function createVideoCard(video, index) {
   const card = document.createElement('div');
   card.className = 'video-card';
+
+  // Thumbnail
+  if (video.thumbnail) {
+    const thumbnailDiv = document.createElement('div');
+    thumbnailDiv.className = 'video-thumbnail';
+
+    const thumbnailImg = document.createElement('img');
+    thumbnailImg.src = video.thumbnail;
+    thumbnailImg.alt = 'Video thumbnail';
+
+    thumbnailDiv.appendChild(thumbnailImg);
+    card.appendChild(thumbnailDiv);
+  }
 
   // Type badge
   const badge = document.createElement('span');
