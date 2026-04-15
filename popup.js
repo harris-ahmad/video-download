@@ -22,6 +22,10 @@ const networkBadgeEl = document.getElementById('network-badge');
 let networkRefreshInterval = null;
 let networkHidden = false;
 
+// Batch download state
+const selectedVideos = new Set();
+let allVideos = [];
+
 let settings = {
   defaultQuality: 'best',
   saveAs: true,
@@ -87,6 +91,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     networkHidden = false;
     loadNetworkMonitor();
   });
+
+  // Batch download controls
+  document.getElementById('select-all-btn').addEventListener('click', selectAllVideos);
+  document.getElementById('deselect-all-btn').addEventListener('click', deselectAllVideos);
+  document.getElementById('download-selected-btn').addEventListener('click', downloadSelectedVideos);
 });
 
 async function loadSettings() {
@@ -388,6 +397,8 @@ function passesFilters(video) {
  */
 function displayVideos(videos) {
   videoListEl.innerHTML = '';
+  allVideos = videos;
+  selectedVideos.clear();
 
   videosBadgeEl.textContent = videos.length;
   if (videos.length > 0) {
@@ -396,10 +407,19 @@ function displayVideos(videos) {
     videosBadgeEl.classList.add('hidden');
   }
 
+  const batchControlsEl = document.getElementById('batch-controls');
+  if (videos.length > 1) {
+    batchControlsEl.classList.remove('hidden');
+  } else {
+    batchControlsEl.classList.add('hidden');
+  }
+
   videos.forEach((video, index) => {
     const card = createVideoCard(video, index);
     videoListEl.appendChild(card);
   });
+
+  updateBatchControls();
 }
 
 /**
@@ -408,6 +428,24 @@ function displayVideos(videos) {
 function createVideoCard(video, index) {
   const card = document.createElement('div');
   card.className = 'video-card';
+  card.dataset.videoSrc = video.src;
+
+  // Checkbox for batch selection
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'video-checkbox';
+  checkbox.dataset.videoIndex = index;
+  checkbox.addEventListener('change', (e) => {
+    if (e.target.checked) {
+      selectedVideos.add(video.src);
+      card.classList.add('selected');
+    } else {
+      selectedVideos.delete(video.src);
+      card.classList.remove('selected');
+    }
+    updateBatchControls();
+  });
+  card.appendChild(checkbox);
 
   // Thumbnail
   if (video.thumbnail) {
@@ -613,9 +651,11 @@ async function captureBlobNow(blobUrl, button) {
   }
 }
 
-async function downloadBlob(blobUrl, button, video) {
-  button.textContent = 'Downloading...';
-  button.disabled = true;
+async function downloadBlob(blobUrl, button, video, batchMode = false) {
+  if (button) {
+    button.textContent = 'Downloading...';
+    button.disabled = true;
+  }
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -630,41 +670,50 @@ async function downloadBlob(blobUrl, button, video) {
       await chrome.downloads.download({
         url: response.dataUrl,
         filename: filename,
-        saveAs: settings.saveAs
+        saveAs: batchMode ? false : settings.saveAs
       });
-      button.textContent = '✓ Done';
+      if (button) button.textContent = '✓ Done';
     } else {
       throw new Error(response.error);
     }
   } catch (error) {
     console.error('Blob download error:', error);
-    button.textContent = '✗ Expired';
-    button.className = 'download-btn error';
-
-    let errorMsg = 'Blob URL has expired.\n\n';
-
-    if (video && !video.blobCaptured) {
-      errorMsg += 'The blob was detected but could not be captured in time.\n\n';
+    if (button) {
+      button.textContent = '✗ Expired';
+      button.className = 'download-btn error';
     }
 
-    errorMsg += 'Tips:\n';
-    errorMsg += '• Refresh the page and try downloading immediately\n';
-    errorMsg += '• Try right-clicking the video → "Save video as"\n';
-    errorMsg += '• Some sites intentionally block blob downloads';
+    if (!batchMode) {
+      let errorMsg = 'Blob URL has expired.\n\n';
 
-    alert(errorMsg);
+      if (video && !video.blobCaptured) {
+        errorMsg += 'The blob was detected but could not be captured in time.\n\n';
+      }
+
+      errorMsg += 'Tips:\n';
+      errorMsg += '• Refresh the page and try downloading immediately\n';
+      errorMsg += '• Try right-clicking the video → "Save video as"\n';
+      errorMsg += '• Some sites intentionally block blob downloads';
+
+      alert(errorMsg);
+    }
+    throw error;
   } finally {
-    setTimeout(() => {
-      button.textContent = 'Download';
-      button.disabled = false;
-      button.className = 'download-btn';
-    }, 3000);
+    if (button) {
+      setTimeout(() => {
+        button.textContent = 'Download';
+        button.disabled = false;
+        button.className = 'download-btn';
+      }, 3000);
+    }
   }
 }
 
-async function downloadDirect(url, button) {
-  button.textContent = 'Starting...';
-  button.disabled = true;
+async function downloadDirect(url, button, batchMode = false) {
+  if (button) {
+    button.textContent = 'Starting...';
+    button.disabled = true;
+  }
 
   try {
     const filename = generateFilename(url, 'video');
@@ -672,36 +721,49 @@ async function downloadDirect(url, button) {
       action: 'startDownload',
       url: url,
       filename: filename,
-      saveAs: settings.saveAs
+      saveAs: batchMode ? false : settings.saveAs
     });
 
     if (response.downloadId) {
-      button.textContent = '✓ Queued';
+      if (button) button.textContent = '✓ Queued';
     }
   } catch (error) {
     console.error('Download error:', error);
-    button.textContent = '✗ Failed';
-    button.className = 'download-btn error';
+    if (button) {
+      button.textContent = '✗ Failed';
+      button.className = 'download-btn error';
+    }
+    throw error;
   } finally {
-    setTimeout(() => {
-      button.textContent = 'Download';
-      button.disabled = false;
-      button.className = 'download-btn';
-    }, 2000);
+    if (button) {
+      setTimeout(() => {
+        button.textContent = 'Download';
+        button.disabled = false;
+        button.className = 'download-btn';
+      }, 2000);
+    }
   }
 }
 
-async function downloadHLSVideo(manifestUrl, button) {
-  button.textContent = 'Loading...';
-  button.disabled = true;
+async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
+  if (button) {
+    button.textContent = 'Loading...';
+    button.disabled = true;
+  }
 
   try {
     const variants = await getHLSVariants(manifestUrl);
 
-    button.textContent = 'Download';
-    button.disabled = false;
+    if (button) {
+      button.textContent = 'Download';
+      button.disabled = false;
+    }
 
-    if (settings.defaultQuality === 'ask' || variants.length === 1) {
+    if (batchMode) {
+      // In batch mode, auto-select best quality
+      const selectedVariant = selectQualityByPreference(variants, 'best');
+      return await startHLSDownload(selectedVariant, manifestUrl, button, batchMode);
+    } else if (settings.defaultQuality === 'ask' || variants.length === 1) {
       showQualitySelector(variants, (selectedVariant) => {
         startHLSDownload(selectedVariant, manifestUrl, button);
       });
@@ -711,9 +773,14 @@ async function downloadHLSVideo(manifestUrl, button) {
     }
   } catch (error) {
     console.error('Failed to load variants:', error);
-    button.textContent = 'Download';
-    button.disabled = false;
-    alert(`Failed to load quality options: ${error.message}`);
+    if (button) {
+      button.textContent = 'Download';
+      button.disabled = false;
+    }
+    if (!batchMode) {
+      alert(`Failed to load quality options: ${error.message}`);
+    }
+    throw error;
   }
 }
 
@@ -748,71 +815,91 @@ function selectQualityByPreference(variants, preference) {
   return best;
 }
 
-async function startHLSDownload(variant, manifestUrl, button) {
-  button.textContent = 'Downloading...';
-  button.disabled = true;
+async function startHLSDownload(variant, manifestUrl, button, batchMode = false) {
+  if (button) {
+    button.textContent = 'Downloading...';
+    button.disabled = true;
+  }
 
   try {
     const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
-      if (status === 'Remuxing to MP4') {
-        button.textContent = 'Remuxing to MP4...';
-      } else {
-        button.textContent = `Downloading ${current}/${total}`;
+      if (button) {
+        if (status === 'Remuxing to MP4') {
+          button.textContent = 'Remuxing to MP4...';
+        } else {
+          button.textContent = `Downloading ${current}/${total}`;
+        }
       }
     });
 
     const filename = generateFilename(manifestUrl, 'hls-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
-    button.textContent = '✓ Done';
+    if (button) button.textContent = '✓ Done';
   } catch (error) {
     console.error('Download failed:', error);
-    button.textContent = '✗ Failed';
-    button.className = 'download-btn error';
+    if (button) {
+      button.textContent = '✗ Failed';
+      button.className = 'download-btn error';
+    }
+    throw error;
   } finally {
-    setTimeout(() => {
-      button.textContent = 'Download';
-      button.disabled = false;
-      button.className = 'download-btn';
-    }, 2000);
+    if (button) {
+      setTimeout(() => {
+        button.textContent = 'Download';
+        button.disabled = false;
+        button.className = 'download-btn';
+      }, 2000);
+    }
   }
 }
 
 /**
  * Downloads a DASH video (mpd) by fetching and concatenating segments
  */
-async function downloadDASHVideo(manifestUrl, button) {
-  const originalText = button.textContent;
-  button.textContent = 'Preparing...';
-  button.disabled = true;
+async function downloadDASHVideo(manifestUrl, button, batchMode = false) {
+  const originalText = button ? button.textContent : '';
+  if (button) {
+    button.textContent = 'Preparing...';
+    button.disabled = true;
+  }
 
   try {
     const videoBlob = await downloadDASH(manifestUrl, (current, total, status) => {
-      if (status === 'Muxing MP4') {
-        button.textContent = 'Muxing MP4...';
-      } else if (status === 'Downloading video') {
-        button.textContent = `Video ${current}/${total}`;
-      } else if (status === 'Downloading audio') {
-        button.textContent = `Audio ${current}/${total}`;
-      } else {
-        button.textContent = `${current}/${total}`;
+      if (button) {
+        if (status === 'Muxing MP4') {
+          button.textContent = 'Muxing MP4...';
+        } else if (status === 'Downloading video') {
+          button.textContent = `Video ${current}/${total}`;
+        } else if (status === 'Downloading audio') {
+          button.textContent = `Audio ${current}/${total}`;
+        } else {
+          button.textContent = `${current}/${total}`;
+        }
       }
     });
 
     const filename = generateFilename(manifestUrl, 'dash-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
 
-    button.textContent = '✓ Downloaded';
+    if (button) button.textContent = '✓ Downloaded';
   } catch (error) {
     console.error('DASH download error:', error);
-    button.textContent = '✗ Failed';
-    button.className = 'download-btn error';
-    alert(`DASH download failed: ${error.message}`);
+    if (button) {
+      button.textContent = '✗ Failed';
+      button.className = 'download-btn error';
+    }
+    if (!batchMode) {
+      alert(`DASH download failed: ${error.message}`);
+    }
+    throw error;
   } finally {
-    setTimeout(() => {
-      button.textContent = originalText;
-      button.disabled = false;
-      button.className = 'download-btn';
-    }, 2000);
+    if (button) {
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.disabled = false;
+        button.className = 'download-btn';
+      }, 2000);
+    }
   }
 }
 
@@ -975,5 +1062,145 @@ async function updateQueueDisplay() {
     });
   } catch (error) {
     console.error('Failed to update queue:', error);
+  }
+}
+
+/**
+ * Batch Download Functions
+ */
+
+function selectAllVideos() {
+  const checkboxes = document.querySelectorAll('.video-checkbox');
+  checkboxes.forEach(checkbox => {
+    if (!checkbox.checked) {
+      checkbox.checked = true;
+      const videoSrc = checkbox.closest('.video-card').dataset.videoSrc;
+      selectedVideos.add(videoSrc);
+      checkbox.closest('.video-card').classList.add('selected');
+    }
+  });
+  updateBatchControls();
+}
+
+function deselectAllVideos() {
+  const checkboxes = document.querySelectorAll('.video-checkbox');
+  checkboxes.forEach(checkbox => {
+    if (checkbox.checked) {
+      checkbox.checked = false;
+      checkbox.closest('.video-card').classList.remove('selected');
+    }
+  });
+  selectedVideos.clear();
+  updateBatchControls();
+}
+
+function updateBatchControls() {
+  const selectedCountEl = document.getElementById('selected-count');
+  const downloadSelectedBtn = document.getElementById('download-selected-btn');
+
+  // Check if elements exist (they might be temporarily removed during download)
+  if (selectedCountEl) {
+    selectedCountEl.textContent = selectedVideos.size;
+  }
+
+  if (downloadSelectedBtn) {
+    if (selectedVideos.size > 0) {
+      downloadSelectedBtn.disabled = false;
+    } else {
+      downloadSelectedBtn.disabled = true;
+    }
+  }
+}
+
+async function downloadSelectedVideos() {
+  if (selectedVideos.size === 0) return;
+
+  const downloadBtn = document.getElementById('download-selected-btn');
+  const originalText = downloadBtn.innerHTML;
+
+  downloadBtn.disabled = true;
+  downloadBtn.innerHTML = `Downloading... (<span id="selected-count">${selectedVideos.size}</span>)`;
+
+  const selectedUrls = Array.from(selectedVideos);
+  const selectedVideoObjs = allVideos.filter(v => selectedUrls.includes(v.src));
+
+  let completed = 0;
+  let failed = 0;
+
+  for (let i = 0; i < selectedVideoObjs.length; i++) {
+    const video = selectedVideoObjs[i];
+    const remaining = selectedVideoObjs.length - i;
+
+    try {
+      // Show what's happening
+      if (video.type === 'blob' && !video.blobCaptured) {
+        downloadBtn.innerHTML = `Capturing blob... (<span id="selected-count">${remaining}</span> left)`;
+      } else if (video.type === 'hls' || video.type === 'dash') {
+        downloadBtn.innerHTML = `Processing ${video.type.toUpperCase()}... (<span id="selected-count">${remaining}</span> left)`;
+      } else {
+        downloadBtn.innerHTML = `Downloading... (<span id="selected-count">${remaining}</span> left)`;
+      }
+
+      await downloadVideoInBatch(video);
+      completed++;
+    } catch (error) {
+      console.error(`Failed to download ${video.src}:`, error);
+      failed++;
+    }
+
+    // Small delay between downloads to avoid overwhelming the system
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  // Show completion message
+  if (failed === 0) {
+    downloadBtn.innerHTML = `✓ Downloaded ${completed}`;
+    setTimeout(() => {
+      downloadBtn.innerHTML = originalText;
+      downloadBtn.disabled = false;
+    }, 2000);
+  } else {
+    downloadBtn.innerHTML = `⚠ ${completed} OK, ${failed} Failed`;
+    setTimeout(() => {
+      downloadBtn.innerHTML = originalText;
+      downloadBtn.disabled = false;
+    }, 3000);
+  }
+
+  // Deselect all after batch download
+  deselectAllVideos();
+}
+
+async function downloadVideoInBatch(video) {
+  if (video.type === 'hls') {
+    return await downloadHLSVideo(video.src, null, true);
+  } else if (video.type === 'dash') {
+    return await downloadDASHVideo(video.src, null, true);
+  } else if (video.type === 'blob') {
+    if (video.blobCaptured) {
+      return await downloadBlob(video.src, null, video, true);
+    } else {
+      // Try to capture the blob first
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          action: 'forceCapture',
+          url: video.src,
+          recordFromStart: false,
+          duration: 60
+        });
+
+        if (response.success) {
+          // Now download the captured blob
+          return await downloadBlob(video.src, null, video, true);
+        } else {
+          throw new Error('Failed to capture blob');
+        }
+      } catch (error) {
+        throw new Error(`Blob capture failed: ${error.message}`);
+      }
+    }
+  } else {
+    return await downloadDirect(video.src, null, true);
   }
 }

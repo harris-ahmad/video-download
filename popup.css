@@ -162,6 +162,66 @@ body {
   background: #555;
 }
 
+/* Batch Controls */
+.batch-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  gap: 12px;
+}
+
+.batch-selection {
+  display: flex;
+  gap: 8px;
+}
+
+.batch-btn {
+  background: #333;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.batch-btn:hover {
+  background: #444;
+  color: #fff;
+}
+
+.download-selected-btn {
+  background: #4A90E2;
+  color: #fff;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.download-selected-btn:hover:not(:disabled) {
+  background: #357ABD;
+}
+
+.download-selected-btn:disabled {
+  background: #333;
+  color: #666;
+  cursor: not-allowed;
+}
+
+#selected-count {
+  font-weight: 600;
+}
+
 /* Video Card */
 .video-card {
   background: #242424;
@@ -172,6 +232,7 @@ body {
   flex-direction: column;
   gap: 10px;
   transition: all 0.2s ease;
+  position: relative;
 }
 
 .video-card:hover {
@@ -179,6 +240,25 @@ body {
   border-color: #444;
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.video-card.selected {
+  border-color: #4A90E2;
+  background: #2a3545;
+}
+
+.video-checkbox {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  z-index: 10;
+}
+
+.video-checkbox:checked {
+  accent-color: #4A90E2;
 }
 
 /* Video Thumbnail */

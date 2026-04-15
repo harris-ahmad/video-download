@@ -54,6 +54,17 @@
         <small>Try playing a video first, then click refresh</small>
       </div>
 
+      <!-- Batch Controls -->
+      <div id="batch-controls" class="batch-controls hidden">
+        <div class="batch-selection">
+          <button id="select-all-btn" class="batch-btn">Select All</button>
+          <button id="deselect-all-btn" class="batch-btn">Deselect All</button>
+        </div>
+        <button id="download-selected-btn" class="download-selected-btn" disabled>
+          Download Selected (<span id="selected-count">0</span>)
+        </button>
+      </div>
+
       <!-- Video List -->
       <div id="video-list" class="video-list hidden">
       </div>
