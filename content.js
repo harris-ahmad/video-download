@@ -1,5 +1,30 @@
 const blobDataCache = new Map();
 let dynamicVideosCache = [];
+let currentUrl = location.href;
+
+// Clear caches when navigating to a new page
+function clearCaches() {
+  blobDataCache.clear();
+  dynamicVideosCache = [];
+  console.log('Video caches cleared due to navigation');
+}
+
+// Detect navigation and clear caches
+function checkForNavigation() {
+  if (location.href !== currentUrl) {
+    console.log('Navigation detected:', currentUrl, '->', location.href);
+    currentUrl = location.href;
+    clearCaches();
+  }
+}
+
+// Check for navigation every 500ms (for SPAs like YouTube)
+setInterval(checkForNavigation, 500);
+
+// Also clear on page show (handles back/forward navigation)
+window.addEventListener('pageshow', () => {
+  checkForNavigation();
+});
 
 function detectVideos() {
   const videos = [];
@@ -197,12 +222,21 @@ function setupDynamicObserver() {
 
       urls.forEach(url => {
           if (!dynamicVideosCache.some(v => v.src === url)) {
+              const duration = videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null;
+
+              // Filter short preview videos on homepage/feed pages only
+              const isHomepageOrFeed = isYouTubeHomepage();
+              if (isHomepageOrFeed && duration !== null && duration < 15) {
+                  console.log('Skipping short preview video on homepage:', url, 'duration:', duration);
+                  return;
+              }
+
               const videoData = {
                   src: url,
                   type: getVideoType(url),
                   width: videoElement.videoWidth || videoElement.clientWidth || null,
                   height: videoElement.videoHeight || videoElement.clientHeight || null,
-                  duration: videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null,
+                  duration: duration,
                   dynamic: true,
                   thumbnail: captureThumbnail(videoElement)
               };
