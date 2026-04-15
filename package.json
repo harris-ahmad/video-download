@@ -1,0 +1,24 @@
+{
+  "name": "video-download",
+  "version": "1.0.0",
+  "description": "download every video that you see online! nothing to worry. it's free, you don't pay anything.",
+  "main": "content.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harris-ahmad/video-download.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/harris-ahmad/video-download/issues"
+  },
+  "homepage": "https://github.com/harris-ahmad/video-download#readme",
+  "devDependencies": {
+    "@types/chrome": "^0.1.40"
+  }
+}
