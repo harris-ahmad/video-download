@@ -38,13 +38,24 @@ function detectVideos() {
   function getVideoType(url) {
       const urlLower = url.toLowerCase();
 
+      // Blob URLs are special, check first
       if (urlLower.startsWith('blob:')) return 'blob';
-      if (urlLower.includes('.mp4') || urlLower.includes('mp4')) return 'mp4';
-      if (urlLower.includes('.webm') || urlLower.includes('webm')) return 'webm';
-      if (urlLower.includes('.m3u8')) return 'hls';
-      if (urlLower.includes('.mpd')) return 'dash';
-      if (urlLower.includes('.ogg')) return 'ogg';
-      if (urlLower.includes('.mov')) return 'mov';
+
+      // Extract pathname for accurate detection
+      let pathname;
+      try {
+          const urlObj = new URL(url);
+          pathname = urlObj.pathname.toLowerCase();
+      } catch {
+          pathname = url.split('?')[0].toLowerCase();
+      }
+
+      if (pathname.endsWith('.mp4')) return 'mp4';
+      if (pathname.endsWith('.webm')) return 'webm';
+      if (pathname.endsWith('.m3u8')) return 'hls';
+      if (pathname.endsWith('.mpd')) return 'dash';
+      if (pathname.endsWith('.ogg')) return 'ogg';
+      if (pathname.endsWith('.mov')) return 'mov';
 
       return 'unknown';
   }

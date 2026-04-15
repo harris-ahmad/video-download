@@ -9,6 +9,7 @@
     "scripting",
     "downloads",
     "webRequest",
+    "webNavigation",
     "storage"
   ],
 
