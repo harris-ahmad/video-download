@@ -536,12 +536,18 @@ async function downloadDASHVideo(manifestUrl, button) {
   button.disabled = true;
 
   try {
-    // Download DASH segments with progress callback
-    const videoBlob = await downloadDASH(manifestUrl, (current, total) => {
-      button.textContent = `Downloading ${current}/${total}`;
+    const videoBlob = await downloadDASH(manifestUrl, (current, total, status) => {
+      if (status === 'Muxing MP4') {
+        button.textContent = 'Muxing MP4...';
+      } else if (status === 'Downloading video') {
+        button.textContent = `Video ${current}/${total}`;
+      } else if (status === 'Downloading audio') {
+        button.textContent = `Audio ${current}/${total}`;
+      } else {
+        button.textContent = `${current}/${total}`;
+      }
     });
 
-    // Trigger download
     const filename = generateFilename(manifestUrl, 'dash-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
 

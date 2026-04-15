@@ -141,47 +141,82 @@ function parseM3U8(manifestText, baseUrl) {
   }
 }
 
-/**
- * Downloads a DASH video by parsing the MPD manifest
- * @param {string} manifestUrl - URL to the .mpd manifest file
- * @param {Function} onProgress - Callback for progress updates
- * @returns {Promise<Blob>} - Combined video blob
- */
 async function downloadDASH(manifestUrl, onProgress) {
   try {
-    // Fetch the MPD manifest
     const manifestResponse = await fetch(manifestUrl);
     const manifestText = await manifestResponse.text();
 
-    // Parse XML
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(manifestText, 'text/xml');
 
-    // Extract segment URLs (simplified - DASH is complex)
-    const segmentUrls = parseMPD(xmlDoc, manifestUrl);
+    const parsed = parseMPD(xmlDoc, manifestUrl);
 
-    if (segmentUrls.length === 0) {
-      throw new Error('No video segments found in MPD manifest');
+    if (!parsed.video && !parsed.audio) {
+      throw new Error('No video or audio tracks found in MPD');
     }
 
-    // Download all segments
-    const segments = [];
-    for (let i = 0; i < segmentUrls.length; i++) {
-      if (onProgress) {
-        onProgress(i + 1, segmentUrls.length);
+    const allSegments = [];
+    let totalSegments = 0;
+    let downloadedSegments = 0;
+
+    if (parsed.video) {
+      totalSegments += parsed.video.segments.length;
+    }
+    if (parsed.audio) {
+      totalSegments += parsed.audio.segments.length;
+    }
+
+    if (parsed.video) {
+      if (parsed.video.init) {
+        const initResponse = await fetch(parsed.video.init);
+        const initBlob = await initResponse.blob();
+        allSegments.push(initBlob);
       }
 
-      try {
-        const segmentResponse = await fetch(segmentUrls[i]);
-        const segmentBlob = await segmentResponse.blob();
-        segments.push(segmentBlob);
-      } catch (error) {
-        console.warn(`Failed to download segment ${i + 1}:`, error);
+      for (let i = 0; i < parsed.video.segments.length; i++) {
+        if (onProgress) {
+          downloadedSegments++;
+          onProgress(downloadedSegments, totalSegments, 'Downloading video');
+        }
+
+        try {
+          const response = await fetch(parsed.video.segments[i]);
+          const blob = await response.blob();
+          allSegments.push(blob);
+        } catch (error) {
+          console.warn(`Video segment ${i + 1} failed:`, error);
+        }
       }
     }
 
-    // Concatenate segments
-    const combinedBlob = new Blob(segments, { type: 'video/mp4' });
+    if (parsed.audio) {
+      if (parsed.audio.init) {
+        const initResponse = await fetch(parsed.audio.init);
+        const initBlob = await initResponse.blob();
+        allSegments.push(initBlob);
+      }
+
+      for (let i = 0; i < parsed.audio.segments.length; i++) {
+        if (onProgress) {
+          downloadedSegments++;
+          onProgress(downloadedSegments, totalSegments, 'Downloading audio');
+        }
+
+        try {
+          const response = await fetch(parsed.audio.segments[i]);
+          const blob = await response.blob();
+          allSegments.push(blob);
+        } catch (error) {
+          console.warn(`Audio segment ${i + 1} failed:`, error);
+        }
+      }
+    }
+
+    if (onProgress) {
+      onProgress(totalSegments, totalSegments, 'Muxing MP4');
+    }
+
+    const combinedBlob = new Blob(allSegments, { type: 'video/mp4' });
     return combinedBlob;
 
   } catch (error) {
@@ -189,34 +224,166 @@ async function downloadDASH(manifestUrl, onProgress) {
   }
 }
 
-/**
- * Simplified MPD parser (DASH manifests are complex, this handles basic cases)
- * @param {Document} xmlDoc - Parsed XML document
- * @param {string} baseUrl - Base URL for resolving paths
- * @returns {Array<string>} - Array of segment URLs
- */
 function parseMPD(xmlDoc, baseUrl) {
-  // This is a simplified implementation
-  // Full DASH support would require handling templates, timelines, etc.
-  const segmentUrls = [];
+  const urlObj = new URL(baseUrl);
+  const basePath = urlObj.origin + urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
 
-  // Try to find SegmentList or SegmentTemplate
-  const segmentLists = xmlDoc.getElementsByTagName('SegmentList');
+  const result = { video: null, audio: null };
 
-  if (segmentLists.length > 0) {
-    const segmentURLs = segmentLists[0].getElementsByTagName('SegmentURL');
-    const urlObj = new URL(baseUrl);
-    const basePath = urlObj.origin + urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
+  const adaptationSets = xmlDoc.getElementsByTagName('AdaptationSet');
 
-    for (let i = 0; i < segmentURLs.length; i++) {
-      const media = segmentURLs[i].getAttribute('media');
-      if (media) {
-        segmentUrls.push(resolveUrl(media, basePath));
+  for (let i = 0; i < adaptationSets.length; i++) {
+    const adaptationSet = adaptationSets[i];
+    const contentType = adaptationSet.getAttribute('contentType') ||
+                       adaptationSet.getAttribute('mimeType') || '';
+
+    const representations = adaptationSet.getElementsByTagName('Representation');
+
+    if (representations.length === 0) continue;
+
+    let bestRepresentation = representations[0];
+    let bestBandwidth = parseInt(bestRepresentation.getAttribute('bandwidth') || '0');
+
+    for (let j = 1; j < representations.length; j++) {
+      const bandwidth = parseInt(representations[j].getAttribute('bandwidth') || '0');
+      if (bandwidth > bestBandwidth) {
+        bestBandwidth = bandwidth;
+        bestRepresentation = representations[j];
+      }
+    }
+
+    const trackData = extractSegments(bestRepresentation, basePath, adaptationSet);
+
+    if (contentType.includes('video') || (!contentType && trackData.hasVideo)) {
+      result.video = trackData;
+    } else if (contentType.includes('audio') || (!contentType && trackData.hasAudio)) {
+      result.audio = trackData;
+    }
+  }
+
+  return result;
+}
+
+function extractSegments(representation, basePath, adaptationSet) {
+  const segments = [];
+  let initSegment = null;
+  let hasVideo = false;
+  let hasAudio = false;
+
+  const mimeType = representation.getAttribute('mimeType') ||
+                  adaptationSet.getAttribute('mimeType') || '';
+
+  if (mimeType.includes('video')) hasVideo = true;
+  if (mimeType.includes('audio')) hasAudio = true;
+
+  const segmentTemplate = representation.getElementsByTagName('SegmentTemplate')[0] ||
+                         adaptationSet.getElementsByTagName('SegmentTemplate')[0];
+
+  if (segmentTemplate) {
+    const mediaTemplate = segmentTemplate.getAttribute('media');
+    const initTemplate = segmentTemplate.getAttribute('initialization');
+    const startNumber = parseInt(segmentTemplate.getAttribute('startNumber') || '1');
+    const duration = parseInt(segmentTemplate.getAttribute('duration') || '0');
+    const timescale = parseInt(segmentTemplate.getAttribute('timescale') || '1');
+
+    const repId = representation.getAttribute('id');
+    const bandwidth = representation.getAttribute('bandwidth');
+
+    if (initTemplate) {
+      initSegment = resolveTemplate(initTemplate, repId, bandwidth, 0, 0);
+      initSegment = resolveUrl(initSegment, basePath);
+    }
+
+    const segmentTimeline = segmentTemplate.getElementsByTagName('SegmentTimeline')[0];
+
+    if (segmentTimeline) {
+      const S = segmentTimeline.getElementsByTagName('S');
+      let currentTime = 0;
+      let currentNumber = startNumber;
+
+      for (let i = 0; i < S.length; i++) {
+        const t = parseInt(S[i].getAttribute('t') || currentTime.toString());
+        const d = parseInt(S[i].getAttribute('d') || '0');
+        const r = parseInt(S[i].getAttribute('r') || '0');
+
+        for (let j = 0; j <= r; j++) {
+          const segmentUrl = resolveTemplate(mediaTemplate, repId, bandwidth, currentNumber, t + (j * d));
+          segments.push(resolveUrl(segmentUrl, basePath));
+          currentNumber++;
+        }
+
+        currentTime = t + ((r + 1) * d);
+      }
+    } else if (duration > 0) {
+      const mediaPresentationDuration = xmlDoc.documentElement.getAttribute('mediaPresentationDuration');
+      let totalDuration = 0;
+
+      if (mediaPresentationDuration) {
+        totalDuration = parseDuration(mediaPresentationDuration);
+      } else {
+        totalDuration = 3600;
+      }
+
+      const segmentCount = Math.ceil((totalDuration * timescale) / duration);
+
+      for (let i = 0; i < segmentCount; i++) {
+        const number = startNumber + i;
+        const time = i * duration;
+        const segmentUrl = resolveTemplate(mediaTemplate, repId, bandwidth, number, time);
+        segments.push(resolveUrl(segmentUrl, basePath));
       }
     }
   }
 
-  return segmentUrls;
+  const segmentList = representation.getElementsByTagName('SegmentList')[0] ||
+                     adaptationSet.getElementsByTagName('SegmentList')[0];
+
+  if (segmentList) {
+    const initialization = segmentList.getElementsByTagName('Initialization')[0];
+    if (initialization) {
+      const sourceURL = initialization.getAttribute('sourceURL');
+      if (sourceURL) {
+        initSegment = resolveUrl(sourceURL, basePath);
+      }
+    }
+
+    const segmentURLs = segmentList.getElementsByTagName('SegmentURL');
+    for (let i = 0; i < segmentURLs.length; i++) {
+      const media = segmentURLs[i].getAttribute('media');
+      if (media) {
+        segments.push(resolveUrl(media, basePath));
+      }
+    }
+  }
+
+  return {
+    init: initSegment,
+    segments: segments,
+    hasVideo: hasVideo,
+    hasAudio: hasAudio
+  };
+}
+
+function resolveTemplate(template, repId, bandwidth, number, time) {
+  return template
+    .replace(/\$RepresentationID\$/g, repId)
+    .replace(/\$Bandwidth\$/g, bandwidth)
+    .replace(/\$Number\$/g, number.toString())
+    .replace(/\$Time\$/g, time.toString())
+    .replace(/\$Number%0(\d+)d\$/g, (_, width) => {
+      return number.toString().padStart(parseInt(width), '0');
+    });
+}
+
+function parseDuration(duration) {
+  const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?/);
+  if (!match) return 0;
+
+  const hours = parseInt(match[1] || '0');
+  const minutes = parseInt(match[2] || '0');
+  const seconds = parseFloat(match[3] || '0');
+
+  return hours * 3600 + minutes * 60 + seconds;
 }
 
 async function getHLSVariants(manifestUrl) {
