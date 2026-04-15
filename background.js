@@ -95,7 +95,6 @@ function addNetworkRequest(tabId, url, headers) {
     };
 
     requests.push(request);
-    console.log(`Network request captured [Tab ${tabId}]:`, mediaType, url);
 
     if (requests.length > MAX_REQUESTS_PER_TAB) requests.shift();
 }
@@ -178,7 +177,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getNetworkRequests") {
         const tabId = request.tabId;
         const requests = networkRequests.get(tabId) || [];
-        console.log(`Sending ${requests.length} network requests for tab ${tabId}`);
         sendResponse({requests: requests});
         return true;
     }

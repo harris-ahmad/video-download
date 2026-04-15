@@ -20,8 +20,14 @@
 
     <!-- Tabs -->
     <div class="tabs">
-      <button class="tab-btn active" data-tab="videos">Videos</button>
-      <button class="tab-btn" data-tab="network">Network Monitor</button>
+      <button class="tab-btn active" data-tab="videos">
+        Videos
+        <span id="videos-badge" class="tab-badge hidden">0</span>
+      </button>
+      <button class="tab-btn" data-tab="network">
+        Network Monitor
+        <span id="network-badge" class="tab-badge hidden">0</span>
+      </button>
     </div>
 
     <!-- Videos Tab -->
@@ -65,13 +71,30 @@
 
     <!-- Network Monitor Tab -->
     <div id="network-tab" class="tab-content hidden">
+      <div class="network-info">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M12 16v-4"></path>
+          <path d="M12 8h.01"></path>
+        </svg>
+        <span>Captures ALL media requests including hidden videos, quality variants, and segments that DOM detection misses</span>
+      </div>
+
       <div class="network-controls">
         <button id="clear-network">Clear</button>
-        <select id="network-filter">
-          <option value="all">All Media</option>
-          <option value="video">Video Only</option>
-          <option value="audio">Audio Only</option>
-        </select>
+        <div class="network-filters">
+          <select id="network-filter">
+            <option value="all">All Media</option>
+            <option value="video">Video Only</option>
+            <option value="audio">Audio Only</option>
+          </select>
+          <select id="size-filter">
+            <option value="0">All Sizes</option>
+            <option value="100">≥ 100 KB</option>
+            <option value="1000">≥ 1 MB</option>
+            <option value="10000">≥ 10 MB</option>
+          </select>
+        </div>
       </div>
 
       <div id="network-empty" class="empty-state">

@@ -15,6 +15,9 @@ const networkListEl = document.getElementById('network-list');
 const networkEmptyEl = document.getElementById('network-empty');
 const clearNetworkBtn = document.getElementById('clear-network');
 const networkFilterEl = document.getElementById('network-filter');
+const sizeFilterEl = document.getElementById('size-filter');
+const videosBadgeEl = document.getElementById('videos-badge');
+const networkBadgeEl = document.getElementById('network-badge');
 
 let networkRefreshInterval = null;
 
@@ -76,6 +79,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   networkFilterEl.addEventListener('change', () => {
     loadNetworkMonitor();
   });
+
+  sizeFilterEl.addEventListener('change', () => {
+    loadNetworkMonitor();
+  });
 });
 
 async function loadSettings() {
@@ -127,9 +134,7 @@ async function loadNetworkMonitor() {
     chrome.runtime.sendMessage(
       { action: 'getNetworkRequests', tabId: tab.id },
       (response) => {
-        console.log('Network requests received:', response);
         if (response && response.requests) {
-          console.log('Total requests:', response.requests.length);
           displayNetworkRequests(response.requests);
         } else {
           displayNetworkRequests([]);
@@ -144,45 +149,53 @@ async function loadNetworkMonitor() {
 
 function displayNetworkRequests(requests) {
   try {
-    console.log('displayNetworkRequests called with:', requests);
-    console.log('networkFilterEl:', networkFilterEl);
-
-    if (!networkFilterEl) {
-      console.error('networkFilterEl is null!');
+    if (!networkFilterEl || !sizeFilterEl) {
+      console.error('Filter elements are null!');
       return;
     }
 
-    const filter = networkFilterEl.value;
-    console.log('Current filter:', filter);
-
-    let filteredRequests = requests;
-    if (filter === 'video') {
-      filteredRequests = requests.filter(r => r.type === 'video');
-    } else if (filter === 'audio') {
-      filteredRequests = requests.filter(r => r.type === 'audio');
+    networkBadgeEl.textContent = requests.length;
+    if (requests.length > 0) {
+      networkBadgeEl.classList.remove('hidden');
+    } else {
+      networkBadgeEl.classList.add('hidden');
     }
 
-    console.log('Filtered requests:', filteredRequests);
-    console.log('Length check:', filteredRequests.length === 0);
+    const typeFilter = networkFilterEl.value;
+    const sizeFilter = parseInt(sizeFilterEl.value);
+
+    let filteredRequests = requests;
+
+    if (typeFilter === 'video') {
+      filteredRequests = filteredRequests.filter(r => r.type === 'video');
+    } else if (typeFilter === 'audio') {
+      filteredRequests = filteredRequests.filter(r => r.type === 'audio');
+    }
+
+    if (sizeFilter > 0) {
+      filteredRequests = filteredRequests.filter(r => {
+        if (!r.size) return false;
+        return r.size >= sizeFilter * 1024;
+      });
+    }
+
+    filteredRequests.sort((a, b) => {
+      const sizeA = a.size || 0;
+      const sizeB = b.size || 0;
+      return sizeB - sizeA;
+    });
 
     if (filteredRequests.length === 0) {
-      console.log('No requests to display, showing empty state');
       networkListEl.classList.add('hidden');
       networkEmptyEl.classList.remove('hidden');
       return;
     }
 
-    console.log('Displaying', filteredRequests.length, 'requests');
-    console.log('networkEmptyEl:', networkEmptyEl);
-    console.log('networkListEl:', networkListEl);
-
     networkEmptyEl.classList.add('hidden');
     networkListEl.classList.remove('hidden');
     networkListEl.innerHTML = '';
 
-    console.log('About to iterate through requests...');
-    filteredRequests.reverse().forEach((request, idx) => {
-      console.log(`Creating item ${idx}:`, request);
+    filteredRequests.reverse().forEach((request) => {
       const item = document.createElement('div');
       item.className = 'network-item';
 
@@ -237,9 +250,7 @@ function displayNetworkRequests(requests) {
       item.appendChild(urlDiv);
       item.appendChild(actions);
 
-      console.log(`Appending item ${idx} to networkListEl`);
       networkListEl.appendChild(item);
-      console.log('networkListEl children count:', networkListEl.children.length);
     });
   } catch (error) {
     console.error('Error in displayNetworkRequests:', error);
@@ -350,8 +361,14 @@ function passesFilters(video) {
  * Creates and displays video cards in the UI
  */
 function displayVideos(videos) {
-  // Clear existing content
   videoListEl.innerHTML = '';
+
+  videosBadgeEl.textContent = videos.length;
+  if (videos.length > 0) {
+    videosBadgeEl.classList.remove('hidden');
+  } else {
+    videosBadgeEl.classList.add('hidden');
+  }
 
   videos.forEach((video, index) => {
     const card = createVideoCard(video, index);
