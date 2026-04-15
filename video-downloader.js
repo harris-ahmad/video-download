@@ -8,27 +8,21 @@
  */
 async function downloadHLS(manifestUrl, onProgress) {
   try {
-    // Step 1: Fetch the m3u8 manifest
     const manifestResponse = await fetch(manifestUrl);
     const manifestText = await manifestResponse.text();
 
-    // Step 2: Check if this is a master playlist
     const parseResult = parseM3U8(manifestText, manifestUrl);
 
     let segmentUrls;
     if (parseResult.isMasterPlaylist) {
-      // This is a master playlist - fetch the best variant playlist
       console.log(`Master playlist detected with ${parseResult.variants.length} variants`);
 
-      // Select the best quality variant (last one is usually highest quality)
       const selectedVariant = parseResult.variants[parseResult.variants.length - 1];
       console.log('Fetching variant playlist:', selectedVariant.url);
 
-      // Fetch the variant playlist
       const variantResponse = await fetch(selectedVariant.url);
       const variantText = await variantResponse.text();
 
-      // Parse the variant playlist to get actual segments
       const variantResult = parseM3U8(variantText, selectedVariant.url);
 
       if (variantResult.isMasterPlaylist) {
@@ -37,7 +31,6 @@ async function downloadHLS(manifestUrl, onProgress) {
 
       segmentUrls = variantResult.segments;
     } else {
-      // Direct playlist with segments
       segmentUrls = parseResult.segments;
     }
 
@@ -45,14 +38,12 @@ async function downloadHLS(manifestUrl, onProgress) {
       throw new Error('No video segments found in manifest');
     }
 
-    // Step 3: Download all segments
     const segments = [];
     for (let i = 0; i < segmentUrls.length; i++) {
       const segmentUrl = segmentUrls[i];
 
-      // Update progress
       if (onProgress) {
-        onProgress(i + 1, segmentUrls.length);
+        onProgress(i + 1, segmentUrls.length, 'Downloading segments');
       }
 
       try {
@@ -61,13 +52,15 @@ async function downloadHLS(manifestUrl, onProgress) {
         segments.push(segmentBlob);
       } catch (error) {
         console.warn(`Failed to download segment ${i + 1}/${segmentUrls.length}:`, error);
-        // Continue anyway - partial download is better than nothing
       }
     }
 
-    // Step 4: Concatenate all segments into one blob
-    const combinedBlob = new Blob(segments, { type: 'video/mp2t' });
-    return combinedBlob;
+    if (onProgress) {
+      onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
+    }
+
+    const mp4Blob = await transmuxToMP4(segments);
+    return mp4Blob;
 
   } catch (error) {
     throw new Error(`HLS download failed: ${error.message}`);
@@ -264,7 +257,7 @@ async function downloadHLSWithQuality(variantUrl, onProgress) {
   const segments = [];
   for (let i = 0; i < segmentUrls.length; i++) {
     if (onProgress) {
-      onProgress(i + 1, segmentUrls.length);
+      onProgress(i + 1, segmentUrls.length, 'Downloading segments');
     }
 
     try {
@@ -276,7 +269,58 @@ async function downloadHLSWithQuality(variantUrl, onProgress) {
     }
   }
 
-  return new Blob(segments, { type: 'video/mp2t' });
+  if (onProgress) {
+    onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
+  }
+
+  return await transmuxToMP4(segments);
+}
+
+async function transmuxToMP4(tsSegments) {
+  return new Promise(async (resolve) => {
+    try {
+      if (typeof muxjs === 'undefined') {
+        console.warn('mux.js not available, returning raw TS');
+        const combinedBlob = new Blob(tsSegments, { type: 'video/mp2t' });
+        resolve(combinedBlob);
+        return;
+      }
+
+      const transmuxer = new muxjs.mp4.Transmuxer({
+        keepOriginalTimestamps: true
+      });
+
+      const mp4Segments = [];
+
+      transmuxer.on('data', (segment) => {
+        if (segment.initSegment) {
+          mp4Segments.push(new Uint8Array(segment.initSegment.byteLength));
+          mp4Segments[mp4Segments.length - 1].set(segment.initSegment);
+        }
+
+        mp4Segments.push(new Uint8Array(segment.data.byteLength));
+        mp4Segments[mp4Segments.length - 1].set(segment.data);
+      });
+
+      transmuxer.on('done', () => {
+        const mp4Blob = new Blob(mp4Segments, { type: 'video/mp4' });
+        resolve(mp4Blob);
+      });
+
+      for (let i = 0; i < tsSegments.length; i++) {
+        const arrayBuffer = await tsSegments[i].arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        transmuxer.push(uint8Array);
+      }
+
+      transmuxer.flush();
+
+    } catch (error) {
+      console.error('Transmux failed:', error);
+      const combinedBlob = new Blob(tsSegments, { type: 'video/mp2t' });
+      resolve(combinedBlob);
+    }
+  });
 }
 
 function resolveUrl(url, baseUrl) {

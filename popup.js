@@ -503,11 +503,15 @@ async function startHLSDownload(variant, manifestUrl, button) {
   button.disabled = true;
 
   try {
-    const videoBlob = await downloadHLSWithQuality(variant.url, (current, total) => {
-      button.textContent = `${current}/${total}`;
+    const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
+      if (status === 'Remuxing to MP4') {
+        button.textContent = 'Remuxing to MP4...';
+      } else {
+        button.textContent = `Downloading ${current}/${total}`;
+      }
     });
 
-    const filename = generateFilename(manifestUrl, 'hls-video') + '.ts';
+    const filename = generateFilename(manifestUrl, 'hls-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
     button.textContent = '✓ Done';
   } catch (error) {
