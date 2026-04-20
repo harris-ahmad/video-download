@@ -1,69 +1,97 @@
 // video-downloader.js - Handles advanced video downloads (HLS, DASH)
 
+const DEFAULT_HLS_SEGMENT_CONCURRENCY = 16;
+const MAX_HLS_SEGMENT_CONCURRENCY = 32;
+const HLS_SEGMENT_RETRIES = 2;
+const HLS_SEGMENT_TIMEOUT_MS = 15000;
+
 /**
  * Downloads an HLS video by parsing the m3u8 manifest and downloading all segments
  * @param {string} manifestUrl - URL to the .m3u8 manifest file
  * @param {Function} onProgress - Callback for progress updates (current, total)
  * @returns {Promise<Blob>} - Combined video blob
  */
-async function downloadHLS(manifestUrl, onProgress) {
+async function downloadHLS(manifestUrl, onProgress, options = {}) {
   try {
-    const manifestResponse = await fetch(manifestUrl);
-    const manifestText = await manifestResponse.text();
+    const manifestText = await fetchHLSPlaylistText(manifestUrl, options, 'Manifest');
 
     const parseResult = parseM3U8(manifestText, manifestUrl);
+    const hlsOptions = resolveHLSDownloadOptions(options);
+
+    if (parseResult.hasEncryption && !parseResult.isMasterPlaylist) {
+      const encryptionError = new Error('This HLS stream is encrypted and cannot be downloaded directly.');
+      encryptionError.code = 'HLS_ENCRYPTED';
+      encryptionError.encryptionMethods = parseResult.encryptionMethods;
+      throw encryptionError;
+    }
 
     let segmentUrls;
+    let initSegmentUrl = null;
     if (parseResult.isMasterPlaylist) {
       console.log(`Master playlist detected with ${parseResult.variants.length} variants`);
 
       const selectedVariant = parseResult.variants[parseResult.variants.length - 1];
       console.log('Fetching variant playlist:', selectedVariant.url);
 
-      const variantResponse = await fetch(selectedVariant.url);
-      const variantText = await variantResponse.text();
+      const variantText = await fetchHLSPlaylistText(selectedVariant.url, options, 'Variant playlist');
 
       const variantResult = parseM3U8(variantText, selectedVariant.url);
+
+      if (variantResult.hasEncryption) {
+        const encryptionError = new Error('This HLS quality variant is encrypted and cannot be downloaded directly.');
+        encryptionError.code = 'HLS_ENCRYPTED';
+        encryptionError.encryptionMethods = variantResult.encryptionMethods;
+        throw encryptionError;
+      }
 
       if (variantResult.isMasterPlaylist) {
         throw new Error('Nested master playlists are not supported');
       }
 
       segmentUrls = variantResult.segments;
+      initSegmentUrl = variantResult.initSegmentUrl || null;
     } else {
       segmentUrls = parseResult.segments;
+      initSegmentUrl = parseResult.initSegmentUrl || null;
     }
 
     if (segmentUrls.length === 0) {
       throw new Error('No video segments found in manifest');
     }
 
-    const segments = [];
-    for (let i = 0; i < segmentUrls.length; i++) {
-      const segmentUrl = segmentUrls[i];
+    const segments = await downloadSegmentsConcurrently(
+      segmentUrls,
+      hlsOptions.hlsConcurrency,
+      HLS_SEGMENT_RETRIES,
+      onProgress,
+      hlsOptions
+    );
 
-      if (onProgress) {
-        onProgress(i + 1, segmentUrls.length, 'Downloading segments');
-      }
+    if (initSegmentUrl) {
+      const initBlob = await fetchInitSegmentBlob(initSegmentUrl, HLS_SEGMENT_RETRIES, hlsOptions);
+      segments.unshift(initBlob);
+    }
 
-      try {
-        const segmentResponse = await fetch(segmentUrl);
-        const segmentBlob = await segmentResponse.blob();
-        segments.push(segmentBlob);
-      } catch (error) {
-        console.warn(`Failed to download segment ${i + 1}/${segmentUrls.length}:`, error);
-      }
+    if (segments.length === 0) {
+      throw new Error('All segments failed to download');
     }
 
     if (onProgress) {
       onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
     }
 
-    const mp4Blob = await transmuxToMP4(segments);
+    const mp4Blob = await finalizeHLSOutput(segments);
     return mp4Blob;
 
   } catch (error) {
-    throw new Error(`HLS download failed: ${error.message}`);
+    const wrappedError = new Error(`HLS download failed: ${error.message}`);
+    if (error && typeof error === 'object') {
+      if (error.code) wrappedError.code = error.code;
+      if (error.encryptionMethods) wrappedError.encryptionMethods = error.encryptionMethods;
+      if (typeof error.failedSegments === 'number') wrappedError.failedSegments = error.failedSegments;
+      if (typeof error.totalSegments === 'number') wrappedError.totalSegments = error.totalSegments;
+    }
+    throw wrappedError;
   }
 }
 
@@ -74,7 +102,37 @@ async function downloadHLS(manifestUrl, onProgress) {
  * @returns {Object} - { isMasterPlaylist: boolean, segments?: Array, variants?: Array }
  */
 function parseM3U8(manifestText, baseUrl) {
-  const lines = manifestText.split('\n').map(line => line.trim());
+  // Validate that this is actually an M3U8 playlist, not HTML or other content
+  if (!manifestText || typeof manifestText !== 'string') {
+    throw new Error('Invalid manifest: not a string');
+  }
+  
+  const trimmedText = manifestText.trim();
+  if (!trimmedText.startsWith('#EXTM3U')) {
+    // Check if we got HTML instead
+    if (trimmedText.startsWith('<') || trimmedText.includes('<!DOCTYPE')) {
+      throw new Error('Invalid manifest: received HTML instead of M3U8 playlist');
+    }
+    throw new Error('Invalid manifest: does not start with #EXTM3U tag');
+  }
+
+  const lines = trimmedText.split('\n').map(line => line.trim());
+  const encryptionMethods = [];
+  const encryptionMethodSet = new Set();
+
+  for (const line of lines) {
+    if (line.startsWith('#EXT-X-KEY')) {
+      const methodMatch = line.match(/METHOD=([^,]+)/);
+      const method = methodMatch ? methodMatch[1].trim() : 'UNKNOWN';
+
+      if (!encryptionMethodSet.has(method)) {
+        encryptionMethodSet.add(method);
+        encryptionMethods.push(method);
+      }
+    }
+  }
+
+  const hasEncryption = encryptionMethods.length > 0;
 
   // Get base URL for resolving relative paths
   const urlObj = new URL(baseUrl);
@@ -86,6 +144,7 @@ function parseM3U8(manifestText, baseUrl) {
   if (isMasterPlaylist) {
     // Parse variant playlists from master playlist
     const variants = [];
+    const fallbackVariants = [];
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -98,31 +157,56 @@ function parseM3U8(manifestText, baseUrl) {
         const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
         const resolution = resolutionMatch ? resolutionMatch[1] : 'unknown';
 
+        const codecsMatch = line.match(/CODECS="([^"]+)"/);
+        const codecs = codecsMatch ? codecsMatch[1] : '';
+        const isLikelyVideo = isLikelyVideoVariant(resolution, codecs);
+
         // Next non-comment line is the variant URL
         for (let j = i + 1; j < lines.length; j++) {
           if (lines[j] && !lines[j].startsWith('#')) {
             const variantUrl = resolveUrl(lines[j], basePath);
-            variants.push({
+            const variant = {
               url: variantUrl,
               bandwidth: bandwidth,
-              resolution: resolution
-            });
+              resolution: resolution,
+              codecs: codecs,
+              isLikelyVideo: isLikelyVideo
+            };
+
+            fallbackVariants.push(variant);
+            if (isLikelyVideo) {
+              variants.push(variant);
+            }
             break;
           }
         }
       }
     }
 
+    const selectedVariants = variants.length > 0 ? variants : fallbackVariants;
+    selectedVariants.sort((a, b) => a.bandwidth - b.bandwidth);
+
     return {
       isMasterPlaylist: true,
-      variants: variants
+      variants: selectedVariants,
+      hasEncryption: hasEncryption,
+      encryptionMethods: encryptionMethods
     };
   } else {
     // Parse segment URLs from variant playlist
     const segmentUrls = [];
+    let initSegmentUrl = null;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
+
+      if (line.startsWith('#EXT-X-MAP')) {
+        const uriMatch = line.match(/URI="([^"]+)"/);
+        if (uriMatch && uriMatch[1]) {
+          initSegmentUrl = resolveUrl(uriMatch[1], basePath);
+        }
+        continue;
+      }
 
       // Skip comments and empty lines
       if (!line || line.startsWith('#')) {
@@ -136,7 +220,10 @@ function parseM3U8(manifestText, baseUrl) {
 
     return {
       isMasterPlaylist: false,
-      segments: segmentUrls
+      segments: segmentUrls,
+      initSegmentUrl: initSegmentUrl,
+      hasEncryption: hasEncryption,
+      encryptionMethods: encryptionMethods
     };
   }
 }
@@ -144,6 +231,9 @@ function parseM3U8(manifestText, baseUrl) {
 async function downloadDASH(manifestUrl, onProgress) {
   try {
     const manifestResponse = await fetch(manifestUrl);
+    if (!manifestResponse.ok) {
+      throw new Error(`MPD request failed (${manifestResponse.status})`);
+    }
     const manifestText = await manifestResponse.text();
 
     const parser = new DOMParser();
@@ -252,7 +342,7 @@ function parseMPD(xmlDoc, baseUrl) {
       }
     }
 
-    const trackData = extractSegments(bestRepresentation, basePath, adaptationSet);
+    const trackData = extractSegments(bestRepresentation, basePath, adaptationSet, xmlDoc);
 
     if (contentType.includes('video') || (!contentType && trackData.hasVideo)) {
       result.video = trackData;
@@ -264,7 +354,7 @@ function parseMPD(xmlDoc, baseUrl) {
   return result;
 }
 
-function extractSegments(representation, basePath, adaptationSet) {
+function extractSegments(representation, basePath, adaptationSet, xmlDoc) {
   const segments = [];
   let initSegment = null;
   let hasVideo = false;
@@ -386,13 +476,29 @@ function parseDuration(duration) {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-async function getHLSVariants(manifestUrl) {
-  const manifestResponse = await fetch(manifestUrl);
-  const manifestText = await manifestResponse.text();
+async function getHLSVariants(manifestUrl, options = {}) {
+  const manifestText = await fetchHLSPlaylistText(manifestUrl, options, 'Manifest');
   const parseResult = parseM3U8(manifestText, manifestUrl);
 
+  if (parseResult.hasEncryption && !parseResult.isMasterPlaylist) {
+    const encryptionError = new Error('This HLS stream is encrypted and cannot be downloaded directly.');
+    encryptionError.code = 'HLS_ENCRYPTED';
+    encryptionError.encryptionMethods = parseResult.encryptionMethods;
+    throw encryptionError;
+  }
+
   if (parseResult.isMasterPlaylist) {
-    return parseResult.variants.map((v, i) => ({
+    const withMetadata = await Promise.all(parseResult.variants.map(async (variant) => {
+      const probe = await probeVariantPlaylistMetadata(variant.url, options);
+      return {
+        ...variant,
+        segmentType: probe.segmentType,
+        hasInitSegment: probe.hasInitSegment,
+        estimatedSegmentCount: probe.segmentCount
+      };
+    }));
+
+    return withMetadata.map((v, i) => ({
       ...v,
       label: v.resolution || `Variant ${i + 1}`,
       isBest: i === parseResult.variants.length - 1,
@@ -410,37 +516,399 @@ async function getHLSVariants(manifestUrl) {
   }];
 }
 
-async function downloadHLSWithQuality(variantUrl, onProgress) {
-  const variantResponse = await fetch(variantUrl);
-  const variantText = await variantResponse.text();
+async function probeVariantPlaylistMetadata(variantUrl, options = {}) {
+  try {
+    const text = await fetchHLSPlaylistText(variantUrl, options, 'Variant probe');
+    const parsed = parseM3U8(text, variantUrl);
+    const firstSegment = Array.isArray(parsed.segments) && parsed.segments.length > 0
+      ? parsed.segments[0]
+      : '';
+
+    return {
+      segmentType: detectHlsSegmentType(firstSegment, parsed.initSegmentUrl),
+      hasInitSegment: Boolean(parsed.initSegmentUrl),
+      segmentCount: Array.isArray(parsed.segments) ? parsed.segments.length : 0
+    };
+  } catch {
+    return {
+      segmentType: 'unknown',
+      hasInitSegment: false,
+      segmentCount: 0
+    };
+  }
+}
+
+function detectHlsSegmentType(segmentUrl, initSegmentUrl) {
+  const first = String(segmentUrl || '').toLowerCase();
+  const init = String(initSegmentUrl || '').toLowerCase();
+
+  if (first.includes('.ts') || first.includes('format=ts')) {
+    return 'ts';
+  }
+
+  if (
+    init.includes('.mp4') ||
+    init.includes('.m4s') ||
+    first.includes('.m4s') ||
+    first.includes('.mp4') ||
+    first.includes('format=mp4') ||
+    first.includes('cmf')
+  ) {
+    return 'fmp4';
+  }
+
+  return 'unknown';
+}
+
+async function downloadHLSWithQuality(variantUrl, onProgress, options = {}) {
+  const hlsOptions = resolveHLSDownloadOptions(options);
+  const variantText = await fetchHLSPlaylistText(variantUrl, hlsOptions, 'Variant playlist');
   const variantResult = parseM3U8(variantText, variantUrl);
 
+  if (variantResult.hasEncryption) {
+    const encryptionError = new Error('This HLS quality variant is encrypted and cannot be downloaded directly.');
+    encryptionError.code = 'HLS_ENCRYPTED';
+    encryptionError.encryptionMethods = variantResult.encryptionMethods;
+    throw encryptionError;
+  }
+
   const segmentUrls = variantResult.segments;
+  const initSegmentUrl = variantResult.initSegmentUrl || null;
 
   if (!segmentUrls || segmentUrls.length === 0) {
     throw new Error('No segments found');
   }
 
-  const segments = [];
-  for (let i = 0; i < segmentUrls.length; i++) {
-    if (onProgress) {
-      onProgress(i + 1, segmentUrls.length, 'Downloading segments');
-    }
+  let segments;
+  try {
+    segments = await downloadSegmentsConcurrently(
+      segmentUrls,
+      hlsOptions.hlsConcurrency,
+      HLS_SEGMENT_RETRIES,
+      onProgress,
+      hlsOptions
+    );
+  } catch (error) {
+    // Don't try variant refresh - it's unreliable when the manifest fetch is problematic
+    // The multi-pass recovery in downloadSegmentsConcurrently should be sufficient
+    throw error;
+  }
 
-    try {
-      const segmentResponse = await fetch(segmentUrls[i]);
-      const segmentBlob = await segmentResponse.blob();
-      segments.push(segmentBlob);
-    } catch (error) {
-      console.warn(`Segment ${i + 1} failed:`, error);
-    }
+  if (segments.length === 0) {
+    throw new Error('All segments failed to download');
+  }
+
+  if (initSegmentUrl) {
+    const initBlob = await fetchInitSegmentBlob(initSegmentUrl, HLS_SEGMENT_RETRIES, hlsOptions);
+    segments.unshift(initBlob);
   }
 
   if (onProgress) {
     onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
   }
 
-  return await transmuxToMP4(segments);
+  return await finalizeHLSOutput(segments);
+}
+
+async function downloadSegmentsConcurrently(segmentUrls, concurrency, retries, onProgress, options = {}) {
+  const total = segmentUrls.length;
+  const segments = new Array(total);
+  let completed = 0;
+  let nextIndex = 0;
+  const failures = new Map();
+
+  const workers = Array.from({ length: Math.min(concurrency, total) }, async () => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex++;
+
+      if (currentIndex >= total) {
+        return;
+      }
+
+      const segmentUrl = segmentUrls[currentIndex];
+
+      try {
+        const segmentBlob = await fetchSegmentWithRetry(segmentUrl, retries, options);
+        segments[currentIndex] = segmentBlob;
+        failures.delete(currentIndex);
+      } catch (error) {
+        failures.set(currentIndex, error);
+        console.warn(`Segment ${currentIndex + 1}/${total} failed:`, error);
+      } finally {
+        completed++;
+        if (onProgress) {
+          onProgress(completed, total, 'Downloading segments');
+        }
+      }
+    }
+  });
+
+  await Promise.all(workers);
+
+  if (failures.size > 0) {
+    await recoverFailedSegments(
+      segmentUrls,
+      segments,
+      failures,
+      retries,
+      concurrency,
+      options,
+      onProgress
+    );
+  }
+
+  const failed = failures.size;
+  const authFailed = Array.from(failures.values()).filter(error => error?.code === 'HLS_AUTH_FORBIDDEN').length;
+
+  if (failed > 0 && authFailed === failed) {
+    const authError = new Error(`All HLS segments were unauthorized (${failed}/${total})`);
+    authError.code = 'HLS_AUTH_FORBIDDEN';
+    authError.failedSegments = failed;
+    authError.totalSegments = total;
+    throw authError;
+  }
+
+  if (failed > 0) {
+    const segmentError = new Error(`Failed to download ${failed} of ${total} HLS segment(s)`);
+    segmentError.code = 'HLS_SEGMENT_DOWNLOAD_FAILED';
+    segmentError.failedSegments = failed;
+    segmentError.totalSegments = total;
+    throw segmentError;
+  }
+
+  return segments.filter(Boolean);
+}
+
+async function recoverFailedSegments(segmentUrls, segments, failures, retries, originalConcurrency, options, onProgress) {
+  const firstPassIndexes = Array.from(failures.keys());
+  const recoveryConcurrency = Math.max(1, Math.min(4, Math.floor(originalConcurrency / 2)));
+
+  await retrySegmentIndexes(
+    firstPassIndexes,
+    segmentUrls,
+    segments,
+    failures,
+    recoveryConcurrency,
+    retries + 1,
+    options,
+    onProgress,
+    'Recovering failed segments'
+  );
+
+  if (failures.size > 0) {
+    const finalPassIndexes = Array.from(failures.keys());
+
+    await retrySegmentIndexes(
+      finalPassIndexes,
+      segmentUrls,
+      segments,
+      failures,
+      1,
+      retries + 2,
+      options,
+      onProgress,
+      'Final segment recovery'
+    );
+  }
+}
+
+async function retrySegmentIndexes(indexes, segmentUrls, segments, failures, concurrency, retries, options, onProgress, statusLabel) {
+  if (indexes.length === 0) {
+    return;
+  }
+
+  let pointer = 0;
+  let completed = 0;
+
+  const workers = Array.from({ length: Math.min(concurrency, indexes.length) }, async () => {
+    while (true) {
+      const pointerIndex = pointer;
+      pointer++;
+
+      if (pointerIndex >= indexes.length) {
+        return;
+      }
+
+      const segmentIndex = indexes[pointerIndex];
+      const segmentUrl = segmentUrls[segmentIndex];
+
+      try {
+        const blob = await fetchSegmentWithRetry(segmentUrl, retries, options);
+        segments[segmentIndex] = blob;
+        failures.delete(segmentIndex);
+      } catch (error) {
+        failures.set(segmentIndex, error);
+      } finally {
+        completed++;
+        if (onProgress) {
+          onProgress(completed, indexes.length, statusLabel);
+        }
+      }
+    }
+  });
+
+  await Promise.all(workers);
+}
+
+function resolveHLSDownloadOptions(options) {
+  const requestedConcurrency = Number(options?.hlsConcurrency);
+  const normalizedConcurrency = Number.isFinite(requestedConcurrency)
+    ? Math.floor(requestedConcurrency)
+    : DEFAULT_HLS_SEGMENT_CONCURRENCY;
+
+  return {
+    hlsConcurrency: Math.max(1, Math.min(MAX_HLS_SEGMENT_CONCURRENCY, normalizedConcurrency)),
+    fetchTextFn: typeof options?.fetchTextFn === 'function' ? options.fetchTextFn : null,
+    fetchSegmentFn: typeof options?.fetchSegmentFn === 'function' ? options.fetchSegmentFn : null
+  };
+}
+
+async function fetchHLSPlaylistText(url, options = {}, label = 'Playlist') {
+  const fetchTextFn = typeof options?.fetchTextFn === 'function' ? options.fetchTextFn : null;
+
+  const response = fetchTextFn
+    ? await fetchTextFn(url)
+    : await fetch(url, { credentials: 'include', cache: 'no-store' });
+
+  if (!response) {
+    const err = new Error(`${label} request failed (network error)`);
+    throw err;
+  }
+
+  const status = response?.status || 'unknown';
+  const text = typeof response.text === 'function' ? await response.text() : '';
+
+  if (isHtmlContent(text)) {
+    const extractedUrl = extractPlaylistUrlFromHtml(text, url);
+    if (extractedUrl && extractedUrl !== url) {
+      console.warn(`${label} returned HTML; retrying extracted playlist URL:`, extractedUrl);
+      return await fetchHLSPlaylistText(extractedUrl, options, `${label} (extracted)`);
+    }
+  }
+
+  if (!response.ok) {
+    const err = new Error(`${label} request failed (${status})`);
+
+    if (status === 401 || status === 403) {
+      err.code = 'HLS_AUTH_FORBIDDEN';
+      err.httpStatus = status;
+    }
+
+    throw err;
+  }
+
+  return text;
+}
+
+function isHtmlContent(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  return normalized.startsWith('<') || normalized.includes('<!doctype html') || normalized.includes('<html');
+}
+
+function extractPlaylistUrlFromHtml(html, baseUrl) {
+  const text = String(html || '');
+  const candidates = [];
+
+  try {
+    const base = new URL(baseUrl);
+    const directUrl = base.searchParams.get('url');
+    if (directUrl) {
+      candidates.push(decodeURIComponent(directUrl));
+    }
+  } catch {
+    // Ignore invalid base URLs
+  }
+
+  const regexes = [
+    /https?:\/\/[^"'\s<>]+\.m3u8[^"'\s<>]*/gi,
+    /\/[^"'\s<>]+\.m3u8[^"'\s<>]*/gi,
+    /url=([^"'&\s<>]+)/gi,
+    /sourceURL=([^"'&\s<>]+)/gi
+  ];
+
+  for (const regex of regexes) {
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      const value = match[1] || match[0];
+      if (!value) continue;
+
+      let decoded = value;
+      try {
+        decoded = decodeURIComponent(value);
+      } catch {
+        // Keep original value
+      }
+
+      if (/\.m3u8(?:[?#].*)?$/i.test(decoded) || decoded.includes('.m3u8')) {
+        candidates.push(decoded);
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return resolveUrl(candidate, baseUrl);
+    } catch {
+      // Keep trying
+    }
+  }
+
+  return null;
+}
+
+async function fetchSegmentWithRetry(segmentUrl, retries, options = {}) {
+  const fetchSegmentFn = typeof options?.fetchSegmentFn === 'function' ? options.fetchSegmentFn : null;
+  let lastError;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetchSegmentResponse(segmentUrl, fetchSegmentFn);
+
+      if (!response.ok) {
+        const httpError = new Error(`HTTP ${response.status}`);
+        if (response.status === 401 || response.status === 403) {
+          httpError.code = 'HLS_AUTH_FORBIDDEN';
+          httpError.httpStatus = response.status;
+        }
+        throw httpError;
+      }
+
+      return await response.blob();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < retries) {
+        const backoffMs = 150 * (attempt + 1);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+async function fetchInitSegmentBlob(initSegmentUrl, retries, options = {}) {
+  return await fetchSegmentWithRetry(initSegmentUrl, retries, options);
+}
+
+async function fetchSegmentResponse(segmentUrl, fetchSegmentFn) {
+  if (fetchSegmentFn) {
+    return await fetchSegmentFn(segmentUrl);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HLS_SEGMENT_TIMEOUT_MS);
+
+  try {
+    return await fetch(segmentUrl, {
+      signal: controller.signal,
+      credentials: 'include',
+      cache: 'no-store'
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function transmuxToMP4(tsSegments) {
@@ -454,15 +922,17 @@ async function transmuxToMP4(tsSegments) {
       }
 
       const transmuxer = new muxjs.mp4.Transmuxer({
-        keepOriginalTimestamps: true
+        keepOriginalTimestamps: false
       });
 
       const mp4Segments = [];
+      let hasInitSegment = false;
 
       transmuxer.on('data', (segment) => {
-        if (segment.initSegment) {
+        if (segment.initSegment && !hasInitSegment) {
           mp4Segments.push(new Uint8Array(segment.initSegment.byteLength));
           mp4Segments[mp4Segments.length - 1].set(segment.initSegment);
+          hasInitSegment = true;
         }
 
         mp4Segments.push(new Uint8Array(segment.data.byteLength));
@@ -470,6 +940,12 @@ async function transmuxToMP4(tsSegments) {
       });
 
       transmuxer.on('done', () => {
+        if (mp4Segments.length === 0) {
+          const fallbackBlob = new Blob(tsSegments, { type: 'video/mp2t' });
+          resolve(fallbackBlob);
+          return;
+        }
+
         const mp4Blob = new Blob(mp4Segments, { type: 'video/mp4' });
         resolve(mp4Blob);
       });
@@ -488,6 +964,61 @@ async function transmuxToMP4(tsSegments) {
       resolve(combinedBlob);
     }
   });
+}
+
+async function finalizeHLSOutput(segments) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    throw new Error('No segments available to finalize');
+  }
+
+  const probeCount = Math.min(3, segments.length);
+  for (let i = 0; i < probeCount; i++) {
+    const buffer = await segments[i].arrayBuffer();
+    if (isLikelyFragmentedMp4Data(buffer)) {
+      return new Blob(segments, { type: 'video/mp4' });
+    }
+  }
+
+  return await transmuxToMP4(segments);
+}
+
+function isLikelyFragmentedMp4Data(buffer) {
+  const bytes = new Uint8Array(buffer || new ArrayBuffer(0));
+  if (bytes.length < 8) return false;
+
+  const maxOffset = Math.min(bytes.length - 8, 128);
+  for (let offset = 0; offset <= maxOffset; offset++) {
+    const marker = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    if (marker === 'ftyp' || marker === 'moof' || marker === 'styp' || marker === 'moov') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isLikelyVideoVariant(resolution, codecs) {
+  if (resolution && resolution !== 'unknown') {
+    return true;
+  }
+
+  const normalizedCodecs = String(codecs || '').toLowerCase();
+  if (!normalizedCodecs) {
+    return true;
+  }
+
+  const hasVideoCodec = /avc1|avc3|hvc1|hev1|dvhe|dvh1|vp09|vp9|av01|theora/.test(normalizedCodecs);
+  const hasAudioOnlyCodec = /mp4a|ac-3|ec-3|opus|vorbis|flac/.test(normalizedCodecs) && !hasVideoCodec;
+
+  if (hasVideoCodec) {
+    return true;
+  }
+
+  if (hasAudioOnlyCodec) {
+    return false;
+  }
+
+  return true;
 }
 
 function resolveUrl(url, baseUrl) {

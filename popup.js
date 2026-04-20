@@ -34,6 +34,7 @@ let settings = {
   minResolution: 0,
   theme: 'dark',
   maxConcurrent: 3,
+  hlsConcurrency: 16,
   networkDetection: true
 };
 
@@ -100,9 +101,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function loadSettings() {
   const stored = await chrome.storage.sync.get('settings');
-  if (stored.settings) {
-    settings = stored.settings;
-  }
+  settings = { ...settings, ...(stored.settings || {}) };
 }
 
 /**
@@ -361,19 +360,90 @@ function isAudioUrl(url) {
   return audioExtensions.some(ext => pathname.endsWith(ext));
 }
 
+function hasUsableMetadata(video) {
+  const width = Number(video?.width || 0);
+  const height = Number(video?.height || 0);
+  const duration = Number(video?.duration || 0);
+  return (width > 0 && height > 0) || duration > 0;
+}
+
+function isLikelyAdUrl(url) {
+  const normalized = String(url || '').toLowerCase();
+  const adMarkers = [
+    'admatic',
+    'doubleclick',
+    'googlesyndication',
+    'adservice',
+    'outstream',
+    'prebid',
+    'teads',
+    'vast',
+    '/ads/',
+    'preroll',
+    'midroll',
+    'postroll'
+  ];
+
+  return adMarkers.some(marker => normalized.includes(marker));
+}
+
+function isLikelySegmentOrChunkUrl(url) {
+  const normalized = String(url || '').toLowerCase();
+  return (
+    normalized.includes('.ts') ||
+    normalized.includes('.m4s') ||
+    /\/seg-\d+/i.test(normalized) ||
+    /\/chunk-?\d+/i.test(normalized) ||
+    /\/fragment-?\d+/i.test(normalized) ||
+    /\/index-v\d+-a\d+\.m3u8/i.test(normalized)
+  );
+}
+
+function isLikelyMasterPlaylistUrl(url) {
+  const normalized = String(url || '').toLowerCase();
+  return normalized.includes('master.m3u8') || normalized.includes('/master/');
+}
+
+function shouldDisplayVideoCard(video) {
+  if (!video?.src) return false;
+
+  const type = String(video.type || '').toLowerCase();
+  const hasMetadata = hasUsableMetadata(video);
+
+  if (video.sourceKind === 'network' && !hasMetadata) {
+    return false;
+  }
+
+  if (isAudioUrl(video.src) || isLikelyAdUrl(video.src) || isLikelySegmentOrChunkUrl(video.src)) {
+    return false;
+  }
+
+  if (type === 'unknown' && !hasMetadata) {
+    return false;
+  }
+
+  if (type === 'hls' && !hasMetadata && !isLikelyMasterPlaylistUrl(video.src)) {
+    return false;
+  }
+
+  return true;
+}
+
 function mergeVideos(contentVideos, networkVideos) {
   const videoMap = new Map();
 
   contentVideos.forEach(video => {
-    if (passesFilters(video)) {
-      videoMap.set(video.src, video);
+    const enriched = { ...video, sourceKind: 'content' };
+    if (passesFilters(enriched) && shouldDisplayVideoCard(enriched)) {
+      videoMap.set(enriched.src, enriched);
     }
   });
 
   networkVideos.forEach(video => {
     // Filter out audio files - they should only appear in Network Monitor
-    if (!videoMap.has(video.src) && passesFilters(video) && !isAudioUrl(video.src)) {
-      videoMap.set(video.src, video);
+    const enriched = { ...video, sourceKind: 'network' };
+    if (!videoMap.has(enriched.src) && passesFilters(enriched) && !isAudioUrl(enriched.src) && shouldDisplayVideoCard(enriched)) {
+      videoMap.set(enriched.src, enriched);
     }
   });
 
@@ -499,7 +569,7 @@ function createVideoCard(video, index) {
     const warningDiv = document.createElement('div');
     warningDiv.className = 'video-meta';
     warningDiv.style.color = '#FF8C42';
-    warningDiv.textContent = '⚡ Click button to capture';
+    warningDiv.textContent = '⚡ Blob stream - trying automatic extraction';
     infoDiv.appendChild(warningDiv);
   }
 
@@ -532,14 +602,11 @@ function createDownloadButton(video) {
     btn.textContent = 'Download';
     btn.addEventListener('click', () => downloadDASHVideo(video.src, btn));
   } else if (video.type === 'blob') {
-    if (video.blobCaptured) {
-      btn.textContent = 'Download';
-      btn.addEventListener('click', () => downloadBlob(video.src, btn, video));
-    } else {
-      btn.textContent = 'Capture & Download';
+    btn.textContent = 'Download';
+    if (!video.blobCaptured) {
       btn.style.background = '#FF8C42';
-      btn.addEventListener('click', () => captureBlobNow(video.src, btn));
     }
+    btn.addEventListener('click', () => downloadBlob(video.src, btn, video));
   } else {
     // Direct download for mp4, webm, ogg, mov, unknown
     btn.textContent = 'Download';
@@ -549,116 +616,24 @@ function createDownloadButton(video) {
   return btn;
 }
 
-/**
- * Downloads a blob URL by fetching it from content script
- */
-async function captureBlobNow(blobUrl, button) {
-  const durationInput = prompt(
-    'How many seconds to record?\n\n' +
-    'Enter duration (default: 60 seconds)\n' +
-    'Note: Very long recordings (>10 min) may cause memory issues',
-    '60'
-  );
-
-  if (durationInput === null) return;
-
-  const duration = Math.max(parseInt(durationInput) || 60, 1);
-
-  const recordFromStart = confirm(
-    `Will record ${duration} seconds.\n\n` +
-    '✓ Yes - Record from beginning\n' +
-    '✗ No - Record from current position'
-  );
-
-  button.textContent = recordFromStart ? 'Rewinding...' : 'Starting...';
-  button.disabled = true;
-  button.classList.add('recording');
-
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-    let elapsed = 0;
-    const countdownInterval = setInterval(() => {
-      elapsed++;
-      button.textContent = `Recording ${elapsed}/${duration}s`;
-    }, 1000);
-
-    try {
-      const response = await Promise.race([
-        chrome.tabs.sendMessage(tab.id, {
-          action: 'forceCapture',
-          url: blobUrl,
-          recordFromStart: recordFromStart,
-          duration: duration
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Recording timeout')), (duration + 10) * 1000))
-      ]);
-
-      clearInterval(countdownInterval);
-
-      if (response.success) {
-        button.textContent = 'Processing...';
-
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-        const filename = `recorded-video-${timestamp}.webm`;
-
-        await chrome.downloads.download({
-          url: response.dataUrl,
-          filename: filename,
-          saveAs: settings.saveAs
-        });
-
-        button.textContent = '✓ Recorded';
-        button.style.background = '#2ECC71';
-
-        setTimeout(() => {
-          alert('Video recorded successfully!\n\n✓ Saved as: ' + filename + '\n\n✓ Duration: ' + duration + ' seconds\n\nNote: The video is in WebM format. If you need MP4, you can convert it using HandBrake or FFmpeg.');
-        }, 500);
-      } else {
-        throw new Error(response.error);
-      }
-    } catch (innerError) {
-      clearInterval(countdownInterval);
-      throw innerError;
-    }
-  } catch (error) {
-    console.error('Capture failed:', error);
-    button.textContent = '✗ Failed';
-    button.className = 'download-btn error';
-
-    let errorMsg = 'Failed to record video.\n\n';
-    if (error.message === 'Recording timeout') {
-      errorMsg += 'Recording timed out. Try:\n';
-      errorMsg += '• Shorter duration\n';
-      errorMsg += '• Ensure video is playing\n\n';
-    } else {
-      errorMsg += 'Common issues:\n';
-      errorMsg += '• Video must be playing (not paused)\n';
-      errorMsg += '• Some sites use DRM protection\n';
-      errorMsg += '• Browser may block recording\n\n';
-    }
-    errorMsg += 'Alternative: Try right-clicking video → "Save video as"';
-
-    alert(errorMsg);
-  } finally {
-    button.classList.remove('recording');
-    setTimeout(() => {
-      button.textContent = 'Capture & Download';
-      button.disabled = false;
-      button.className = 'download-btn';
-      button.style.background = '#FF8C42';
-    }, 3000);
-  }
-}
-
 async function downloadBlob(blobUrl, button, video, batchMode = false) {
   if (button) {
-    button.textContent = 'Downloading...';
+    button.textContent = 'Resolving stream...';
     button.disabled = true;
   }
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    const sourceResolved = await tryDownloadBlobFromResolvedSources(blobUrl, tab.id, button, batchMode);
+    if (sourceResolved) {
+      if (button) button.textContent = '✓ Done';
+      return;
+    }
+
+    if (button) {
+      button.textContent = 'Capturing fallback...';
+    }
 
     const response = await chrome.tabs.sendMessage(tab.id, {
       action: 'downloadBlob',
@@ -687,11 +662,12 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
       let errorMsg = 'Blob URL has expired.\n\n';
 
       if (video && !video.blobCaptured) {
-        errorMsg += 'The blob was detected but could not be captured in time.\n\n';
+        errorMsg += 'This appears to be a player-managed stream.\n\n';
       }
 
       errorMsg += 'Tips:\n';
       errorMsg += '• Refresh the page and try downloading immediately\n';
+      errorMsg += '• Keep the video playing when fallback capture starts\n';
       errorMsg += '• Try right-clicking the video → "Save video as"\n';
       errorMsg += '• Some sites intentionally block blob downloads';
 
@@ -707,6 +683,117 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
       }, 3000);
     }
   }
+}
+
+async function tryDownloadBlobFromResolvedSources(blobUrl, tabId, button, batchMode) {
+  try {
+    const sourceResponse = await chrome.tabs.sendMessage(tabId, {
+      action: 'resolveBlobSource',
+      url: blobUrl
+    });
+
+    const sourceCandidates = sourceResponse?.success ? sourceResponse.candidates || [] : [];
+    const networkCandidates = await getNetworkCandidatesForBlob(tabId);
+
+    const mergedCandidates = prioritizeBlobCandidates([...sourceCandidates, ...networkCandidates]);
+
+    for (const candidate of mergedCandidates) {
+      try {
+        if (button) {
+          const label = candidate.type === 'unknown' ? 'stream' : candidate.type.toUpperCase();
+          button.textContent = `Trying ${label}...`;
+        }
+
+        if (candidate.type === 'hls') {
+          console.log('Attempting HLS download from candidate:', candidate.url);
+          await downloadHLSVideo(candidate.url, button, batchMode);
+          console.log('HLS download succeeded');
+          return true;
+        }
+
+        if (candidate.type === 'dash') {
+          console.log('Attempting DASH download from candidate:', candidate.url);
+          await downloadDASHVideo(candidate.url, button, batchMode);
+          console.log('DASH download succeeded');
+          return true;
+        }
+
+        if (['mp4', 'webm', 'mov', 'unknown'].includes(candidate.type)) {
+          console.log('Attempting direct download from candidate:', candidate.url);
+          await downloadDirect(candidate.url, button, batchMode);
+          console.log('Direct download succeeded');
+          return true;
+        }
+      } catch (candidateError) {
+        console.warn('Blob source candidate failed:', candidate.url, candidateError.message);
+      }
+    }
+
+    console.log('All blob source candidates failed, returning false');
+    return false;
+  } catch (error) {
+    console.warn('Failed to resolve blob source candidates:', error);
+    return false;
+  }
+}
+
+async function getNetworkCandidatesForBlob(tabId) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: 'getNetworkRequests',
+      tabId: tabId
+    });
+
+    const requests = response?.requests || [];
+
+    return requests
+      .filter(request => request.type === 'video' && request.url && !request.url.startsWith('blob:'))
+      .slice(-30)
+      .map(request => ({
+        url: request.url,
+        type: detectMediaTypeFromUrl(request.url),
+        reason: 'network.request'
+      }));
+  } catch (error) {
+    console.warn('Failed to read network requests for blob fallback:', error);
+    return [];
+  }
+}
+
+function detectMediaTypeFromUrl(url) {
+  const lower = (url || '').toLowerCase().split('?')[0];
+  if (lower.endsWith('.m3u8')) return 'hls';
+  if (lower.endsWith('.mpd')) return 'dash';
+  if (lower.endsWith('.mp4')) return 'mp4';
+  if (lower.endsWith('.webm')) return 'webm';
+  if (lower.endsWith('.mov')) return 'mov';
+  return 'unknown';
+}
+
+function prioritizeBlobCandidates(candidates) {
+  const seen = new Set();
+  const deduped = [];
+
+  candidates.forEach(candidate => {
+    if (!candidate?.url || seen.has(candidate.url)) return;
+    seen.add(candidate.url);
+    deduped.push(candidate);
+  });
+
+  const typePriority = {
+    hls: 1,
+    dash: 2,
+    mp4: 3,
+    webm: 4,
+    mov: 5,
+    unknown: 6
+  };
+
+  return deduped.sort((a, b) => {
+    const pa = typePriority[a.type] || 99;
+    const pb = typePriority[b.type] || 99;
+    return pa - pb;
+  });
 }
 
 async function downloadDirect(url, button, batchMode = false) {
@@ -752,7 +839,8 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
   }
 
   try {
-    const variants = await getHLSVariants(manifestUrl);
+    const hlsOptions = await buildHLSDownloadOptions();
+    const variants = await getHLSVariants(manifestUrl, hlsOptions);
 
     if (button) {
       button.textContent = 'Download';
@@ -761,15 +849,16 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
 
     if (batchMode) {
       // In batch mode, auto-select best quality
-      const selectedVariant = selectQualityByPreference(variants, 'best');
-      return await startHLSDownload(selectedVariant, manifestUrl, button, batchMode);
+      const selectedVariant = preferStableHLSVariant(variants, selectQualityByPreference(variants, 'best'));
+      return await startHLSDownload(selectedVariant, manifestUrl, button, batchMode, hlsOptions);
     } else if (settings.defaultQuality === 'ask' || variants.length === 1) {
       showQualitySelector(variants, (selectedVariant) => {
-        startHLSDownload(selectedVariant, manifestUrl, button);
+        const safeVariant = preferStableHLSVariant(variants, selectedVariant);
+        startHLSDownload(safeVariant, manifestUrl, button, false, hlsOptions);
       });
     } else {
-      const selectedVariant = selectQualityByPreference(variants, settings.defaultQuality);
-      startHLSDownload(selectedVariant, manifestUrl, button);
+      const selectedVariant = preferStableHLSVariant(variants, selectQualityByPreference(variants, settings.defaultQuality));
+      startHLSDownload(selectedVariant, manifestUrl, button, false, hlsOptions);
     }
   } catch (error) {
     console.error('Failed to load variants:', error);
@@ -778,7 +867,7 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
       button.disabled = false;
     }
     if (!batchMode) {
-      alert(`Failed to load quality options: ${error.message}`);
+      showHLSError(error);
     }
     throw error;
   }
@@ -815,13 +904,55 @@ function selectQualityByPreference(variants, preference) {
   return best;
 }
 
-async function startHLSDownload(variant, manifestUrl, button, batchMode = false) {
+function preferStableHLSVariant(variants, selectedVariant) {
+  if (!Array.isArray(variants) || variants.length === 0 || !selectedVariant) {
+    return selectedVariant;
+  }
+
+  if (selectedVariant.segmentType === 'ts' || selectedVariant.segmentType === 'unknown') {
+    return selectedVariant;
+  }
+
+  const stableVariants = variants.filter(v => v.segmentType === 'ts' || v.segmentType === 'unknown');
+  if (stableVariants.length === 0) {
+    return selectedVariant;
+  }
+
+  const selectedHeight = parseInt(selectedVariant.resolution?.split('x')[1] || '0', 10);
+  const selectedBandwidth = Number(selectedVariant.bandwidth || 0);
+
+  let bestStable = stableVariants[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (const candidate of stableVariants) {
+    const candidateHeight = parseInt(candidate.resolution?.split('x')[1] || '0', 10);
+    const candidateBandwidth = Number(candidate.bandwidth || 0);
+    const heightDiff = Math.abs(candidateHeight - selectedHeight);
+    const bandwidthDiff = Math.abs(candidateBandwidth - selectedBandwidth) / 1000000;
+    const score = (heightDiff * 10) + bandwidthDiff;
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestStable = candidate;
+    }
+  }
+
+  console.warn('Switching from fMP4 variant to stable variant:', {
+    from: selectedVariant,
+    to: bestStable
+  });
+
+  return bestStable;
+}
+
+async function startHLSDownload(variant, manifestUrl, button, batchMode = false, hlsOptions = null) {
   if (button) {
     button.textContent = 'Downloading...';
     button.disabled = true;
   }
 
   try {
+    const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
     const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
       if (button) {
         if (status === 'Remuxing to MP4') {
@@ -830,7 +961,7 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false)
           button.textContent = `Downloading ${current}/${total}`;
         }
       }
-    });
+    }, effectiveOptions);
 
     const filename = generateFilename(manifestUrl, 'hls-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
@@ -840,6 +971,9 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false)
     if (button) {
       button.textContent = '✗ Failed';
       button.className = 'download-btn error';
+    }
+    if (!batchMode) {
+      showHLSError(error);
     }
     throw error;
   } finally {
@@ -851,6 +985,183 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false)
       }, 2000);
     }
   }
+}
+
+function getHLSDownloadOptions() {
+  const parsed = parseInt(settings.hlsConcurrency, 10);
+  const normalized = Number.isFinite(parsed) ? parsed : 16;
+
+  return {
+    hlsConcurrency: Math.max(1, Math.min(32, normalized))
+  };
+}
+
+async function buildHLSDownloadOptions() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const baseOptions = getHLSDownloadOptions();
+
+  if (!tab?.id) {
+    return baseOptions;
+  }
+
+  return {
+    ...baseOptions,
+    fetchTextFn: createHLSTextFetcher(tab.id),
+    fetchSegmentFn: createHLSSegmentFetcher(tab.id)
+  };
+}
+
+function createHLSTextFetcher(tabId) {
+  return async (url) => {
+    let nativeResponse = null;
+    let nativeText = null;
+
+    try {
+      nativeResponse = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store'
+      });
+
+      if (nativeResponse.ok) {
+        nativeText = await nativeResponse.text();
+        
+        // Validate that we got actual M3U8, not HTML
+        if (nativeText && nativeText.trim().startsWith('#EXTM3U')) {
+          console.log('Native HLS playlist fetch successful, using native response');
+          return new Response(nativeText, {
+            status: 200,
+            headers: {
+              'content-type': 'application/vnd.apple.mpegurl'
+            }
+          });
+        }
+        
+        // Got 200 OK but content is not M3U8 (probably HTML redirect/error page)
+        console.warn('Native fetch returned 200 OK but content is HTML/not M3U8:', nativeText?.substring(0, 100));
+      }
+    } catch (error) {
+      console.warn('Native HLS playlist fetch failed:', error);
+    }
+
+    console.log('Falling back to tab-context fetch for manifest...');
+    try {
+      const fallback = await chrome.tabs.sendMessage(tabId, {
+        action: 'fetchMediaText',
+        url: url
+      });
+
+      if (fallback?.success && typeof fallback.text === 'string') {
+        if (fallback.ok) {
+          console.log('Tab-context fetch successful with valid content');
+        } else {
+          console.warn('Tab-context fetch returned non-OK content, passing body through for deeper parsing');
+        }
+
+        return new Response(fallback.text, {
+          status: typeof fallback.status === 'number' ? fallback.status : 200,
+          headers: {
+            'content-type': fallback.contentType || 'application/vnd.apple.mpegurl'
+          }
+        });
+      }
+
+      if (fallback?.success) {
+        console.warn('Tab-context fetch returned status:', fallback.status);
+      }
+    } catch (error) {
+      console.warn('Tab-context HLS playlist fetch fallback failed:', error);
+    }
+
+    if (nativeResponse) {
+      console.warn('All fallbacks failed, returning native response (may be HTML)');
+      return nativeResponse;
+    }
+
+    throw new Error('Manifest request failed (network error)');
+  };
+}
+
+function createHLSSegmentFetcher(tabId) {
+  return async (url) => {
+    let nativeResponse = null;
+
+    try {
+      nativeResponse = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store'
+      });
+
+      if (nativeResponse.ok) {
+        return nativeResponse;
+      }
+    } catch (error) {
+      console.warn('Native HLS segment fetch failed, trying tab-context fallback:', error);
+    }
+
+    try {
+      const fallback = await chrome.tabs.sendMessage(tabId, {
+        action: 'fetchMediaBlob',
+        url: url
+      });
+
+      if (fallback?.success && fallback.ok) {
+        return new Response(fallback.buffer, {
+          status: 200,
+          headers: {
+            'content-type': fallback.contentType || 'application/octet-stream'
+          }
+        });
+      }
+
+      if (fallback?.success && typeof fallback.status === 'number') {
+        return new Response('', { status: fallback.status });
+      }
+    } catch (error) {
+      console.warn('Tab-context HLS segment fetch fallback failed:', error);
+    }
+
+    if (nativeResponse) {
+      return nativeResponse;
+    }
+
+    throw new Error('Segment request failed (network error)');
+  };
+}
+
+function showHLSError(error) {
+  if (error?.code === 'HLS_ENCRYPTED') {
+    const methods = Array.isArray(error.encryptionMethods) && error.encryptionMethods.length > 0
+      ? error.encryptionMethods.join(', ')
+      : 'Unknown';
+
+    alert(
+      'This HLS stream is encrypted and cannot be downloaded directly by this extension.\n\n' +
+      `Encryption method(s): ${methods}\n\n` +
+      'Tip: This usually requires decryption keys from the player session.'
+    );
+    return;
+  }
+
+  if (error?.code === 'HLS_SEGMENT_DOWNLOAD_FAILED') {
+    alert(
+      'HLS download failed because some segments could not be fetched.\n\n' +
+      `Failed segments: ${error.failedSegments}/${error.totalSegments}\n\n` +
+      'Try reducing HLS concurrency in Settings, then retry.'
+    );
+    return;
+  }
+
+  if (error?.code === 'HLS_AUTH_FORBIDDEN') {
+    alert(
+      'HLS download failed with authorization error (401/403).\n\n' +
+      'This stream likely requires session-bound headers/cookies from the webpage.\n\n' +
+      `Failed segments: ${error.failedSegments || 0}/${error.totalSegments || 0}\n\n` +
+      'Tip: Keep the video page open and retry immediately.'
+    );
+    return;
+  }
+
+  alert(`HLS download failed: ${error?.message || 'Unknown error'}`);
 }
 
 /**
@@ -1177,29 +1488,7 @@ async function downloadVideoInBatch(video) {
   } else if (video.type === 'dash') {
     return await downloadDASHVideo(video.src, null, true);
   } else if (video.type === 'blob') {
-    if (video.blobCaptured) {
-      return await downloadBlob(video.src, null, video, true);
-    } else {
-      // Try to capture the blob first
-      try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const response = await chrome.tabs.sendMessage(tab.id, {
-          action: 'forceCapture',
-          url: video.src,
-          recordFromStart: false,
-          duration: 60
-        });
-
-        if (response.success) {
-          // Now download the captured blob
-          return await downloadBlob(video.src, null, video, true);
-        } else {
-          throw new Error('Failed to capture blob');
-        }
-      } catch (error) {
-        throw new Error(`Blob capture failed: ${error.message}`);
-      }
-    }
+    return await downloadBlob(video.src, null, video, true);
   } else {
     return await downloadDirect(video.src, null, true);
   }

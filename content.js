@@ -362,8 +362,20 @@ function captureThumbnail(videoElement) {
 
 async function captureBlobData(blobUrl, videoElement) {
   try {
-      const response = await fetch(blobUrl);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      const response = await fetch(blobUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+          throw new Error(`Blob fetch failed (${response.status})`);
+      }
+
       const blob = await response.blob();
+
+      if (!blob || blob.size === 0) {
+          throw new Error('Blob is empty');
+      }
 
       return new Promise((res, rej) => {
           const reader = new FileReader();
@@ -376,7 +388,11 @@ async function captureBlobData(blobUrl, videoElement) {
 
       if (videoElement) {
           try {
-              return await captureFromVideoElement(videoElement);
+              const duration = getRecommendedCaptureDuration(videoElement, true);
+              return await captureFromVideoElement(videoElement, {
+                  recordSeconds: duration,
+                  recordFromStart: true
+              });
           } catch (altError) {
               console.error('Alternative capture also failed:', altError);
           }
@@ -386,52 +402,122 @@ async function captureBlobData(blobUrl, videoElement) {
   }
 }
 
-async function captureFromVideoElement(videoElement, recordSeconds = 30) {
+async function captureFromVideoElement(videoElement, options = {}) {
   if (!videoElement.captureStream) {
       throw new Error('captureStream not supported');
   }
 
+  const recordSeconds = Math.max(1, Math.floor(options.recordSeconds || 30));
+  const recordFromStart = options.recordFromStart !== false;
+
   return new Promise((resolve, reject) => {
       try {
-          const stream = videoElement.captureStream();
-          const mimeType = MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : 'video/mp4';
-          const mediaRecorder = new MediaRecorder(stream, { mimeType });
+          let originalCurrentTime = videoElement.currentTime;
 
-          const chunks = [];
-
-          mediaRecorder.ondataavailable = (event) => {
-              if (event.data.size > 0) {
-                  chunks.push(event.data);
+          const startRecording = async () => {
+              if (recordFromStart && videoElement.currentTime > 0) {
+                  await seekVideo(videoElement, 0);
               }
-          };
 
-          mediaRecorder.onstop = () => {
-              const blob = new Blob(chunks, { type: mimeType });
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-          };
+              const stream = videoElement.captureStream();
+              const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+                  ? 'video/webm;codecs=vp9,opus'
+                  : (MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : 'video/mp4');
+              const mediaRecorder = new MediaRecorder(stream, { mimeType });
 
-          mediaRecorder.onerror = (error) => {
-              reject(error);
-          };
+              const chunks = [];
 
-          mediaRecorder.start(1000);
+              mediaRecorder.ondataavailable = (event) => {
+                  if (event.data.size > 0) {
+                      chunks.push(event.data);
+                  }
+              };
 
-          if (videoElement.paused) {
-              videoElement.play().catch(() => {});
-          }
+              mediaRecorder.onstop = async () => {
+                  try {
+                      if (recordFromStart && Number.isFinite(originalCurrentTime) && originalCurrentTime > 0) {
+                          await seekVideo(videoElement, originalCurrentTime).catch(() => {});
+                      }
+                  } catch {
+                      // Ignore restore failures
+                  }
 
-          const recordDuration = recordSeconds * 1000;
+                  const blob = new Blob(chunks, { type: mimeType });
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result);
+                  reader.onerror = reject;
+                  reader.readAsDataURL(blob);
+              };
 
-          setTimeout(() => {
-              if (mediaRecorder.state !== 'inactive') {
-                  mediaRecorder.stop();
+              mediaRecorder.onerror = (error) => {
+                  reject(error);
+              };
+
+              mediaRecorder.start(1000);
+
+              if (videoElement.paused) {
+                  videoElement.play().catch(() => {});
               }
-          }, recordDuration);
+
+              const recordDuration = recordSeconds * 1000;
+
+              setTimeout(() => {
+                  if (mediaRecorder.state !== 'inactive') {
+                      mediaRecorder.stop();
+                  }
+              }, recordDuration);
+          };
+
+          startRecording().catch(reject);
 
       } catch (error) {
+          reject(error);
+      }
+  });
+}
+
+function getRecommendedCaptureDuration(videoElement, recordFromStart = true) {
+  const duration = Number(videoElement?.duration);
+  const currentTime = Number(videoElement?.currentTime) || 0;
+
+  if (Number.isFinite(duration) && duration > 0) {
+      const targetSeconds = recordFromStart ? duration : Math.max(1, duration - currentTime);
+      return Math.min(Math.ceil(targetSeconds), 2 * 60 * 60);
+  }
+
+  return 60;
+}
+
+function seekVideo(videoElement, targetTime, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+      const done = () => {
+          cleanup();
+          resolve();
+      };
+
+      const onError = () => {
+          cleanup();
+          reject(new Error('Video seek failed'));
+      };
+
+      const cleanup = () => {
+          clearTimeout(timeout);
+          videoElement.removeEventListener('seeked', done);
+          videoElement.removeEventListener('error', onError);
+      };
+
+      const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('Video seek timeout'));
+      }, timeoutMs);
+
+      videoElement.addEventListener('seeked', done, { once: true });
+      videoElement.addEventListener('error', onError, { once: true });
+
+      try {
+          videoElement.currentTime = Math.max(0, targetTime);
+      } catch (error) {
+          cleanup();
           reject(error);
       }
   });
@@ -443,14 +529,89 @@ async function downloadBlob(blobUrl) {
   }
 
   try {
-      const dataUrl = await captureBlobData(blobUrl);
+      const videoElement = findVideoElementByBlobUrl(blobUrl);
+      const dataUrl = await captureBlobData(blobUrl, videoElement);
       if (!dataUrl) {
           throw new Error('Blob URL has expired or is no longer accessible');
       }
+
+      blobDataCache.set(blobUrl, dataUrl);
       return dataUrl;
   } catch (error) {
       throw new Error(`Failed to fetch blob: ${error.message}`);
   }
+}
+
+function getUrlType(url) {
+  const normalized = (url || '').toLowerCase();
+  if (normalized.endsWith('.m3u8')) return 'hls';
+  if (normalized.endsWith('.mpd')) return 'dash';
+  if (normalized.endsWith('.mp4')) return 'mp4';
+  if (normalized.endsWith('.webm')) return 'webm';
+  if (normalized.endsWith('.mov')) return 'mov';
+  return 'unknown';
+}
+
+function resolveBlobDownloadSources(blobUrl) {
+  const candidates = [];
+  const seen = new Set();
+  const videoElement = findVideoElementByBlobUrl(blobUrl);
+
+  const addCandidate = (url, reason) => {
+      if (!url || typeof url !== 'string') return;
+      const trimmed = url.trim();
+      if (!trimmed || trimmed.startsWith('blob:') || trimmed.startsWith('data:')) return;
+      if (seen.has(trimmed)) return;
+
+      seen.add(trimmed);
+      candidates.push({
+          url: trimmed,
+          type: getUrlType(trimmed),
+          reason: reason
+      });
+  };
+
+  if (videoElement) {
+      addCandidate(videoElement.currentSrc, 'video.currentSrc');
+      addCandidate(videoElement.src, 'video.src');
+
+      const sources = videoElement.querySelectorAll('source');
+      sources.forEach(source => addCandidate(source.src, 'video.source'));
+  }
+
+  const perfEntries = performance.getEntriesByType('resource');
+  for (let i = perfEntries.length - 1; i >= 0; i--) {
+      const entry = perfEntries[i];
+      const name = entry.name || '';
+      const lower = name.toLowerCase();
+
+      if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('.mp4') || lower.includes('.webm')) {
+          addCandidate(name, 'performance.resource');
+      }
+  }
+
+  return {
+      candidates: candidates,
+      duration: Number.isFinite(videoElement?.duration) ? videoElement.duration : null,
+      canCapture: Boolean(videoElement && videoElement.captureStream)
+  };
+}
+
+function findVideoElementByBlobUrl(blobUrl) {
+  const videoElements = document.querySelectorAll('video');
+
+  for (const video of videoElements) {
+      if (video.src === blobUrl) {
+          return video;
+      }
+
+      const sourceMatch = Array.from(video.querySelectorAll('source')).some(source => source.src === blobUrl);
+      if (sourceMatch) {
+          return video;
+      }
+  }
+
+  return null;
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -481,6 +642,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true;
   }
 
+  if (request.action === "resolveBlobSource") {
+      try {
+          const result = resolveBlobDownloadSources(request.url);
+          sendResponse({success: true, ...result});
+      } catch (error) {
+          sendResponse({success: false, error: error.message, candidates: []});
+      }
+      return true;
+  }
+
+  if (request.action === "fetchMediaText") {
+      fetchMediaText(request.url).then(result => {
+          sendResponse({success: true, ...result});
+      }).catch(error => {
+          sendResponse({success: false, error: error.message});
+      });
+      return true;
+  }
+
+  if (request.action === "fetchMediaBlob") {
+      fetchMediaBlob(request.url).then(result => {
+          sendResponse({success: true, ...result});
+      }).catch(error => {
+          sendResponse({success: false, error: error.message});
+      });
+      return true;
+  }
+
   if (request.action === "forceCapture") {
       forceCaptureBlob(request.url, request.recordFromStart, request.duration).then(dataUrl => {
           if (dataUrl) {
@@ -504,15 +693,10 @@ async function forceCaptureBlob(blobUrl, recordFromStart = false, duration = 30)
           Array.from(video.querySelectorAll('source')).some(s => s.src === blobUrl)) {
 
           try {
-              if (recordFromStart && video.currentTime > 0) {
-                  video.currentTime = 0;
-                  await new Promise(resolve => {
-                      video.onseeked = () => resolve();
-                      setTimeout(() => resolve(), 1000);
-                  });
-              }
-
-              return await captureFromVideoElement(video, duration);
+              return await captureFromVideoElement(video, {
+                  recordSeconds: duration,
+                  recordFromStart: recordFromStart
+              });
           } catch (error) {
               console.warn('Video recording failed, trying blob fetch:', error);
           }
@@ -524,5 +708,76 @@ async function forceCaptureBlob(blobUrl, recordFromStart = false, duration = 30)
   } catch (error) {
       console.error('All capture methods failed:', error);
       return null;
+  }
+}
+
+async function fetchMediaText(url) {
+    const result = await fetchMediaResource(url, 'text');
+    
+    // If we got text content, validate it's not HTML (error page)
+    if (result.ok && result.text) {
+        const trimmedText = result.text.trim();
+        if (trimmedText.startsWith('<') || trimmedText.includes('<!DOCTYPE')) {
+            // Got HTML instead of expected content, treat as failure
+            console.warn('fetchMediaText got HTML instead of text content:', trimmedText.substring(0, 100));
+            return {
+                ok: false,
+                status: result.status,
+                text: result.text,
+                contentType: 'text/html'
+            };
+        }
+    }
+    
+    return {
+            ok: result.ok,
+            status: result.status,
+            text: result.text || '',
+            contentType: result.contentType || ''
+    };
+}
+
+async function fetchMediaBlob(url) {
+    const result = await fetchMediaResource(url, 'arrayBuffer');
+    return {
+            ok: result.ok,
+            status: result.status,
+            buffer: result.buffer || new ArrayBuffer(0),
+            contentType: result.contentType || 'application/octet-stream'
+    };
+}
+
+async function fetchMediaResource(url, responseType) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+      const response = await fetch(url, {
+          signal: controller.signal,
+          credentials: 'include',
+          cache: 'no-store'
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+
+      if (responseType === 'text') {
+          const text = response.ok ? await response.text() : '';
+          return {
+              ok: response.ok,
+              status: response.status,
+              text: text,
+              contentType: contentType
+          };
+      }
+
+      const buffer = response.ok ? await response.arrayBuffer() : new ArrayBuffer(0);
+      return {
+          ok: response.ok,
+          status: response.status,
+          buffer: buffer,
+          contentType: contentType
+      };
+  } finally {
+      clearTimeout(timeout);
   }
 }
