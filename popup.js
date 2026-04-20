@@ -685,6 +685,107 @@ function createVideoCard(video, index) {
     infoDiv.appendChild(warningDiv);
   }
 
+  const subtitleTracks = Array.isArray(video.subtitleTracks) ? video.subtitleTracks : [];
+  const liveTranscriptText = typeof video.transcriptText === 'string' ? video.transcriptText.trim() : '';
+  const effectiveSubtitleTracks = liveTranscriptText
+    ? [{
+        src: '',
+        label: 'Live captions',
+        language: 'en',
+        kind: 'transcript',
+        isDefault: true,
+        transcriptText: liveTranscriptText
+      }, ...subtitleTracks]
+    : subtitleTracks;
+  const subtitleRow = document.createElement('div');
+  subtitleRow.className = 'subtitle-row';
+
+  const subtitleStatus = document.createElement('span');
+  subtitleStatus.className = `subtitle-status ${effectiveSubtitleTracks.length > 0 ? 'available' : 'unavailable'}`;
+  subtitleStatus.textContent = effectiveSubtitleTracks.length > 0
+    ? `📝 Subtitles available (${effectiveSubtitleTracks.length})`
+    : '📝 No subtitles found';
+
+  subtitleRow.appendChild(subtitleStatus);
+
+  if (effectiveSubtitleTracks.length > 0) {
+    const subtitleBtn = document.createElement('button');
+    subtitleBtn.className = 'subtitle-btn';
+    subtitleBtn.textContent = 'Save TXT';
+    subtitleBtn.title = 'Download subtitles as a plain-text transcript';
+    subtitleBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      subtitleBtn.disabled = true;
+      const originalText = subtitleBtn.textContent;
+      subtitleBtn.textContent = 'Saving...';
+
+      try {
+        await downloadSubtitleCompanion(video.src, effectiveSubtitleTracks, subtitleBtn, false, null, 'txt');
+        subtitleBtn.textContent = '✓ Saved';
+      } finally {
+        setTimeout(() => {
+          subtitleBtn.textContent = originalText;
+          subtitleBtn.disabled = false;
+        }, 2000);
+      }
+    });
+    subtitleRow.appendChild(subtitleBtn);
+  }
+
+  if (isYouTubeWatchPage(video.pageUrl) || liveTranscriptText) {
+    const recorderBtn = document.createElement('button');
+    recorderBtn.className = 'subtitle-btn recording-toggle';
+    recorderBtn.textContent = 'Record TXT';
+    recorderBtn.title = 'Record live captions while the video plays, then save them as a text file';
+    recorderBtn.dataset.recording = 'false';
+    recorderBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      recorderBtn.disabled = true;
+
+      try {
+        const isRecording = recorderBtn.dataset.recording === 'true';
+
+        if (!isRecording) {
+          const startResult = await sendCaptionRecorderAction('startCaptionRecording');
+          if (!startResult?.success) {
+            throw new Error(startResult?.error || 'Failed to start caption recording');
+          }
+
+          setCaptionRecorderButtonState(recorderBtn, true);
+          return;
+        }
+
+        const stopResult = await sendCaptionRecorderAction('stopCaptionRecording');
+        if (!stopResult?.success) {
+          throw new Error(stopResult?.error || 'Failed to stop caption recording');
+        }
+
+        const transcriptText = String(stopResult.transcriptText || '').trim();
+        if (!transcriptText) {
+          alert('No caption text was captured yet. Keep the video playing a little longer and try again.');
+          return;
+        }
+
+        const filename = buildSubtitleFilename(video.pageUrl || video.src, {
+          label: 'Live captions',
+          language: 'en'
+        }, '.txt');
+        const transcriptBlob = new Blob([transcriptText], { type: 'text/plain' });
+        triggerBlobDownload(transcriptBlob, filename);
+        setCaptionRecorderButtonState(recorderBtn, false);
+      } catch (error) {
+        console.warn('Caption recording failed:', error);
+        alert(`Caption recording failed:\n\n${error?.message || error}`);
+      } finally {
+        recorderBtn.disabled = false;
+      }
+    });
+    subtitleRow.appendChild(recorderBtn);
+    syncCaptionRecorderButtonState(recorderBtn);
+  }
+
+  infoDiv.appendChild(subtitleRow);
+
   infoDiv.appendChild(urlDiv);
 
   const downloadBtn = createDownloadButton(video);
@@ -708,11 +809,11 @@ function createDownloadButton(video) {
   if (video.type === 'hls') {
     // HLS download - fetch and concatenate segments
     btn.textContent = 'Download';
-    btn.addEventListener('click', () => downloadHLSVideo(video.src, btn));
+    btn.addEventListener('click', () => downloadHLSVideo(video.src, btn, false, video.subtitleTracks || []));
   } else if (video.type === 'dash') {
     // DASH download - fetch and concatenate segments
     btn.textContent = 'Download';
-    btn.addEventListener('click', () => downloadDASHVideo(video.src, btn));
+    btn.addEventListener('click', () => downloadDASHVideo(video.src, btn, false, video.subtitleTracks || []));
   } else if (video.type === 'blob') {
     btn.textContent = 'Download';
     if (!video.blobCaptured) {
@@ -722,10 +823,56 @@ function createDownloadButton(video) {
   } else {
     // Direct download for mp4, webm, ogg, mov, unknown
     btn.textContent = 'Download';
-    btn.addEventListener('click', () => downloadDirect(video.src, btn));
+    btn.addEventListener('click', () => downloadDirect(video.src, btn, false, video.subtitleTracks || []));
   }
 
   return btn;
+}
+
+function isYouTubeWatchPage(pageUrl) {
+  try {
+    const parsed = new URL(pageUrl || '');
+    return /(^|\.)youtube\.com$/i.test(parsed.hostname) && parsed.pathname === '/watch';
+  } catch {
+    return String(pageUrl || '').includes('youtube.com/watch');
+  }
+}
+
+function setCaptionRecorderButtonState(button, active) {
+  if (!button) return;
+
+  button.dataset.recording = active ? 'true' : 'false';
+  button.textContent = active ? 'Stop & Save' : 'Record TXT';
+  button.classList.toggle('recording', active);
+}
+
+async function syncCaptionRecorderButtonState(button) {
+  if (!button) return;
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return;
+
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      action: 'getCaptionRecordingStatus'
+    });
+
+    if (response?.success) {
+      setCaptionRecorderButtonState(button, Boolean(response.active));
+    }
+  } catch {
+    // The content script may not be ready yet; keep the default button label.
+  }
+}
+
+async function sendCaptionRecorderAction(action) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  if (!tab?.id) {
+    throw new Error('No active tab found');
+  }
+
+  return chrome.tabs.sendMessage(tab.id, { action: action });
 }
 
 async function downloadBlob(blobUrl, button, video, batchMode = false) {
@@ -737,9 +884,10 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    const sourceResolved = await tryDownloadBlobFromResolvedSources(blobUrl, tab.id, button, batchMode);
+    const sourceResolved = await tryDownloadBlobFromResolvedSources(blobUrl, tab.id, button, batchMode, video?.subtitleTracks || []);
     if (sourceResolved) {
       if (button) button.textContent = '✓ Done';
+      await downloadSubtitleCompanion(video?.src || blobUrl, video?.subtitleTracks || [], button, batchMode);
       return;
     }
 
@@ -759,6 +907,7 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
         filename: filename,
         saveAs: batchMode ? false : settings.saveAs
       });
+      await downloadSubtitleCompanion(video?.src || blobUrl, video?.subtitleTracks || [], button, batchMode);
       if (button) button.textContent = '✓ Done';
     } else {
       throw new Error(response.error);
@@ -797,7 +946,7 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
   }
 }
 
-async function tryDownloadBlobFromResolvedSources(blobUrl, tabId, button, batchMode) {
+async function tryDownloadBlobFromResolvedSources(blobUrl, tabId, button, batchMode, subtitleTracks = []) {
   try {
     const sourceResponse = await chrome.tabs.sendMessage(tabId, {
       action: 'resolveBlobSource',
@@ -818,21 +967,21 @@ async function tryDownloadBlobFromResolvedSources(blobUrl, tabId, button, batchM
 
         if (candidate.type === 'hls') {
           console.log('Attempting HLS download from candidate:', candidate.url);
-          await downloadHLSVideo(candidate.url, button, batchMode);
+          await downloadHLSVideo(candidate.url, button, batchMode, subtitleTracks);
           console.log('HLS download succeeded');
           return true;
         }
 
         if (candidate.type === 'dash') {
           console.log('Attempting DASH download from candidate:', candidate.url);
-          await downloadDASHVideo(candidate.url, button, batchMode);
+          await downloadDASHVideo(candidate.url, button, batchMode, subtitleTracks);
           console.log('DASH download succeeded');
           return true;
         }
 
         if (['mp4', 'webm', 'mov', 'unknown'].includes(candidate.type)) {
           console.log('Attempting direct download from candidate:', candidate.url);
-          await downloadDirect(candidate.url, button, batchMode);
+          await downloadDirect(candidate.url, button, batchMode, subtitleTracks);
           console.log('Direct download succeeded');
           return true;
         }
@@ -908,7 +1057,7 @@ function prioritizeBlobCandidates(candidates) {
   });
 }
 
-async function downloadDirect(url, button, batchMode = false) {
+async function downloadDirect(url, button, batchMode = false, subtitleTracks = []) {
   if (button) {
     button.textContent = 'Starting...';
     button.disabled = true;
@@ -925,6 +1074,7 @@ async function downloadDirect(url, button, batchMode = false) {
 
     if (response.downloadId) {
       if (button) button.textContent = '✓ Queued';
+      await downloadSubtitleCompanion(url, subtitleTracks, button, batchMode);
     }
   } catch (error) {
     console.error('Download error:', error);
@@ -944,7 +1094,7 @@ async function downloadDirect(url, button, batchMode = false) {
   }
 }
 
-async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
+async function downloadHLSVideo(manifestUrl, button, batchMode = false, subtitleTracks = []) {
   if (button) {
     button.textContent = 'Loading...';
     button.disabled = true;
@@ -966,11 +1116,11 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false) {
     } else if (settings.defaultQuality === 'ask' || variants.length === 1) {
       showQualitySelector(variants, (selectedVariant) => {
         const safeVariant = preferStableHLSVariant(variants, selectedVariant);
-        startHLSDownload(safeVariant, manifestUrl, button, false, hlsOptions);
+        startHLSDownload(safeVariant, manifestUrl, button, false, hlsOptions, subtitleTracks);
       });
     } else {
       const selectedVariant = preferStableHLSVariant(variants, selectQualityByPreference(variants, settings.defaultQuality));
-      startHLSDownload(selectedVariant, manifestUrl, button, false, hlsOptions);
+      startHLSDownload(selectedVariant, manifestUrl, button, false, hlsOptions, subtitleTracks);
     }
   } catch (error) {
     console.error('Failed to load variants:', error);
@@ -1057,7 +1207,7 @@ function preferStableHLSVariant(variants, selectedVariant) {
   return bestStable;
 }
 
-async function startHLSDownload(variant, manifestUrl, button, batchMode = false, hlsOptions = null) {
+async function startHLSDownload(variant, manifestUrl, button, batchMode = false, hlsOptions = null, subtitleTracks = []) {
   if (button) {
     button.textContent = 'Downloading...';
     button.disabled = true;
@@ -1076,6 +1226,7 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
 
     console.log('[startHLSDownload] Success, setting button to Started');
     if (button) button.textContent = '✓ Started';
+    await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode, effectiveOptions);
   } catch (error) {
     console.warn('[startHLSDownload] Persistent HLS download failed, trying fallback:', error);
 
@@ -1190,6 +1341,417 @@ async function buildHLSDownloadOptions() {
     fetchTextFn: createHLSTextFetcher(tab.id),
     fetchSegmentFn: createHLSSegmentFetcher(tab.id)
   };
+}
+
+function selectBestSubtitleTrack(tracks) {
+  if (!Array.isArray(tracks) || tracks.length === 0) {
+    return null;
+  }
+
+  const withTranscriptText = tracks.find(track => typeof track?.transcriptText === 'string' && track.transcriptText.trim());
+  if (withTranscriptText) return withTranscriptText;
+
+  const transcriptOnly = tracks.find(track => track?.kind === 'transcript' && !track?.src);
+  if (transcriptOnly) return transcriptOnly;
+
+  const withDefault = tracks.find(track => track?.isDefault);
+  if (withDefault) return withDefault;
+
+  const withEnglish = tracks.find(track => {
+    const haystack = `${track?.label || ''} ${track?.language || ''} ${track?.kind || ''}`.toLowerCase();
+    return haystack.includes('en') || haystack.includes('eng') || haystack.includes('english');
+  });
+  if (withEnglish) return withEnglish;
+
+  return tracks[0];
+}
+
+function inferSubtitleExtension(trackUrl) {
+  const lower = String(trackUrl || '').toLowerCase().split('?')[0].split('#')[0];
+  if (lower.endsWith('.srt')) return '.srt';
+  return '.vtt';
+}
+
+function buildSubtitleFilename(sourceUrl, track, extension = '.txt') {
+  const base = String(generateFilename(sourceUrl, 'subtitles') || 'subtitles')
+    .replace(/\.(mp4|ts|m3u8|mpd|webm|mov|vtt|srt)$/i, '');
+  const language = track?.language ? `-${String(track.language).replace(/[^a-z0-9]+/gi, '').toLowerCase()}` : '';
+  return `${base}${language}${extension}`;
+}
+
+function normalizeSubtitleText(text, extension) {
+  const raw = String(text || '').replace(/^\uFEFF/, '').trim();
+
+  if (extension === '.srt') {
+    return `${raw}\n`;
+  }
+
+  if (/^WEBVTT\b/i.test(raw)) {
+    return raw.endsWith('\n') ? raw : `${raw}\n`;
+  }
+
+  return `WEBVTT\n\n${raw}\n`;
+}
+
+function stripWebVttHeader(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '').trim();
+  return raw.replace(/^WEBVTT(?:\s.*)?\n+/i, '').trim();
+}
+
+async function fetchSubtitleText(url, options = {}) {
+  const cleanUrl = String(url || '').split('#')[0];
+  const fetchTextFn = typeof options?.fetchTextFn === 'function' ? options.fetchTextFn : null;
+
+  if (isYouTubeTimedTextUrl(cleanUrl)) {
+    const transcriptText = await fetchYouTubeTranscriptText(cleanUrl, options);
+    if (transcriptText && transcriptText.trim()) {
+      return transcriptText.trim();
+    }
+    return '';
+  }
+
+  if (/\.m3u8(?:[?#].*)?$/i.test(cleanUrl)) {
+    const playlistText = await fetchHLSPlaylistText(cleanUrl, options, 'Subtitle playlist');
+    const parsed = parseM3U8(playlistText, cleanUrl);
+
+    if (parsed.isMasterPlaylist) {
+      throw new Error('Nested subtitle playlists are not supported');
+    }
+
+    if (!Array.isArray(parsed.segments) || parsed.segments.length === 0) {
+      throw new Error('No subtitle segments found');
+    }
+
+    const subtitleChunks = [];
+
+    for (const [index, segmentUrl] of parsed.segments.entries()) {
+      let response;
+
+      if (fetchTextFn) {
+        response = await fetchTextFn(segmentUrl);
+      } else {
+        response = await fetch(segmentUrl, { credentials: 'include', cache: 'no-store' });
+      }
+
+      if (!response) {
+        throw new Error('Subtitle segment request failed (network error)');
+      }
+
+      if (!response.ok) {
+        throw new Error(`Subtitle segment request failed (${response.status})`);
+      }
+
+      const segmentText = typeof response.text === 'function' ? await response.text() : '';
+      const cleaned = index === 0 ? segmentText.trim() : stripWebVttHeader(segmentText);
+      if (cleaned) {
+        subtitleChunks.push(cleaned);
+      }
+    }
+
+    const combined = subtitleChunks.join('\n\n');
+    return normalizeSubtitleText(combined, '.vtt');
+  }
+
+  let response;
+  if (fetchTextFn) {
+    response = await fetchTextFn(cleanUrl);
+  } else {
+    response = await fetch(cleanUrl, { credentials: 'include', cache: 'no-store' });
+  }
+
+  if (!response) {
+    throw new Error('Subtitle request failed (network error)');
+  }
+
+  if (!response.ok) {
+    throw new Error(`Subtitle request failed (${response.status})`);
+  }
+
+  const text = typeof response.text === 'function' ? await response.text() : '';
+  const extension = inferSubtitleExtension(cleanUrl);
+  return normalizeSubtitleText(text, extension);
+}
+
+function isYouTubeTimedTextUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)youtube\.com$/i.test(parsed.hostname) && parsed.pathname.includes('/api/timedtext');
+  } catch {
+    return String(url || '').includes('youtube.com/api/timedtext');
+  }
+}
+
+async function fetchYouTubeTranscriptText(url, options = {}) {
+  const fetchTextFn = typeof options?.fetchTextFn === 'function' ? options.fetchTextFn : null;
+  const candidateUrls = buildYouTubeTranscriptUrls(url);
+
+  for (const candidateUrl of candidateUrls) {
+    let response;
+
+    if (fetchTextFn) {
+      response = await fetchTextFn(candidateUrl);
+    } else {
+      response = await fetch(candidateUrl, { credentials: 'include', cache: 'no-store' });
+    }
+
+    if (!response?.ok) {
+      continue;
+    }
+
+    const text = typeof response.text === 'function' ? await response.text() : '';
+    const trimmed = text.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const data = JSON.parse(trimmed);
+        const lines = extractYouTubeTranscriptLines(data);
+        if (lines.length > 0) {
+          return lines.join('\n');
+        }
+      } catch {
+        // Try the next format.
+      }
+      continue;
+    }
+
+    if (/^WEBVTT\b/i.test(trimmed)) {
+      const plain = parseWebVttTranscriptLines(trimmed);
+      if (plain.length > 0) {
+        return plain.join('\n');
+      }
+      continue;
+    }
+
+    if (/^<\?xml|^<transcript\b|<text\b/i.test(trimmed)) {
+      const xmlLines = extractTranscriptLinesFromXml(trimmed);
+      if (xmlLines.length > 0) {
+        return xmlLines.join('\n');
+      }
+      continue;
+    }
+
+    const fallbackLines = trimmed
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    if (fallbackLines.length > 0) {
+      return fallbackLines.join('\n');
+    }
+  }
+
+  return '';
+}
+
+function buildYouTubeTranscriptUrls(url) {
+  try {
+    const parsed = new URL(url);
+    const kindMatch = url.match(/[?&]kind=([^&]+)/i);
+    const languageMatch = url.match(/[?&]lang=([^&]+)/i);
+    const baseParams = new URLSearchParams(parsed.searchParams);
+
+    if (kindMatch?.[1] && !baseParams.has('kind')) {
+      baseParams.set('kind', kindMatch[1]);
+    }
+    if (languageMatch?.[1] && !baseParams.has('lang')) {
+      baseParams.set('lang', languageMatch[1]);
+    }
+
+    return ['json3', 'srv3', 'vtt', 'ttml']
+      .map(format => {
+        const next = new URL(parsed.toString());
+        next.search = baseParams.toString();
+        next.searchParams.set('fmt', format);
+        return next.toString();
+      });
+  } catch {
+    const withoutFmt = String(url || '').replace(/([?&])fmt=[^&]*&?/i, '$1').replace(/[?&]$/, '');
+    const separator = withoutFmt.includes('?') ? '&' : '?';
+    return [
+      `${withoutFmt}${separator}fmt=json3`,
+      `${withoutFmt}${separator}fmt=srv3`,
+      `${withoutFmt}${separator}fmt=vtt`,
+      `${withoutFmt}${separator}fmt=ttml`
+    ];
+  }
+}
+
+function extractYouTubeTranscriptLines(data) {
+  const events = Array.isArray(data?.events) ? data.events : [];
+  const lines = [];
+
+  events.forEach(event => {
+    const segs = Array.isArray(event?.segs) ? event.segs : [];
+    const text = segs.map(seg => seg?.utf8 || '').join('').replace(/\n+/g, ' ').trim();
+    if (text) {
+      lines.push(text);
+    } else if (typeof event?.utf8 === 'string' && event.utf8.trim()) {
+      lines.push(event.utf8.trim());
+    }
+  });
+
+  return lines;
+}
+
+function parseWebVttTranscriptLines(text) {
+  const normalized = String(text || '').replace(/^\uFEFF/, '').trim();
+  if (!/^WEBVTT\b/i.test(normalized)) {
+    return [];
+  }
+
+  const blocks = normalized.split(/\r?\n\r?\n+/);
+  const lines = [];
+
+  for (const block of blocks) {
+    const blockLines = block
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    for (const line of blockLines) {
+      if (/^WEBVTT(?:\s.*)?$/i.test(line)) continue;
+      if (/^NOTE(?:\s.*)?$/i.test(line)) continue;
+      if (/^STYLE$/i.test(line) || /^REGION$/i.test(line)) continue;
+      if (/^\d+$/.test(line)) continue;
+      if (/^\d{2}:\d{2}(:\d{2})?[\.,]\d{3}\s+-->/i.test(line)) continue;
+      if (/^X-TIMESTAMP-MAP=/i.test(line)) continue;
+      const cleaned = line.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (cleaned) {
+        lines.push(cleaned);
+      }
+    }
+  }
+
+  return lines;
+}
+
+function extractTranscriptLinesFromXml(text) {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(String(text || ''), 'text/xml');
+    if (doc.querySelector('parsererror')) {
+      return [];
+    }
+
+    return Array.from(doc.querySelectorAll('text, p'))
+      .map(node => (node.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function subtitleTextToPlainText(text) {
+  const lines = String(text || '')
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .map(line => line.trim());
+
+  const output = [];
+  for (const line of lines) {
+    if (!line) {
+      if (output.length && output[output.length - 1] !== '') {
+        output.push('');
+      }
+      continue;
+    }
+
+    if (/^WEBVTT(?:\s.*)?$/i.test(line)) continue;
+    if (/^\d+$/.test(line)) continue;
+    if (/^\d{2}:\d{2}:\d{2}[\.,]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[\.,]\d{3}/.test(line)) continue;
+    if (/^\d{2}:\d{2}[\.,]\d{3}\s+-->\s+\d{2}:\d{2}[\.,]\d{3}/.test(line)) continue;
+    if (/^NOTE(?:\s.*)?$/i.test(line)) continue;
+    if (/^STYLE$/i.test(line) || /^REGION$/i.test(line)) continue;
+    if (/^X-TIMESTAMP-MAP=/i.test(line)) continue;
+    if (/^<v\s+/i.test(line)) {
+      output.push(line.replace(/^<v\s+[^>]+>/i, '').replace(/<\/v>$/i, '').trim());
+      continue;
+    }
+
+    output.push(line.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+
+  const plainText = output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (plainText) {
+    return plainText;
+  }
+
+  return extractSubtitleTextFallback(text);
+}
+
+function extractSubtitleTextFallback(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (/^<\?xml|^<transcript\b|<text\b/i.test(raw)) {
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(raw, 'text/xml');
+      const parseError = doc.querySelector('parsererror');
+      if (!parseError) {
+        const xmlLines = Array.from(doc.querySelectorAll('text, p'))
+          .map(node => (node.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+
+        if (xmlLines.length > 0) {
+          return xmlLines.join('\n');
+        }
+      }
+    } catch {
+      // Fall through to the generic cleanup below.
+    }
+  }
+
+  const genericLines = raw
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !/^WEBVTT(?:\s.*)?$/i.test(line) && !/^\d+$/.test(line) && !/^NOTE(?:\s.*)?$/i.test(line));
+
+  return genericLines
+    .map(line => line.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+async function downloadSubtitleCompanion(sourceUrl, subtitleTracks, button, batchMode = false, options = {}, outputFormat = 'txt') {
+  const track = selectBestSubtitleTrack(subtitleTracks);
+  if (!track?.src && !track?.transcriptText) {
+    return false;
+  }
+
+  try {
+    const transcriptText = typeof track.transcriptText === 'string' ? track.transcriptText.trim() : '';
+    const subtitleOptions = options && typeof options.fetchTextFn === 'function'
+      ? options
+      : await buildHLSDownloadOptions();
+    const subtitleText = transcriptText || (track.src ? await fetchSubtitleText(track.src, subtitleOptions) : '');
+    if (!subtitleText || !subtitleText.trim()) {
+      return false;
+    }
+
+    const extension = outputFormat === 'txt' ? '.txt' : inferSubtitleExtension(track.src || sourceUrl);
+    const subtitleBody = outputFormat === 'txt'
+      ? (transcriptText || subtitleTextToPlainText(subtitleText) || subtitleText || '')
+      : subtitleText;
+    const filename = buildSubtitleFilename(sourceUrl, track, extension);
+    const subtitleBlob = new Blob([subtitleBody], { type: 'text/plain' });
+
+    if (!subtitleBody || !String(subtitleBody).trim()) {
+      console.warn('Subtitle export resolved to empty text; skipping save for', track.src);
+      return false;
+    }
+
+    triggerBlobDownload(subtitleBlob, filename);
+    return true;
+  } catch (error) {
+    console.warn('Subtitle save failed:', error);
+    return false;
+  }
 }
 
 function createHLSTextFetcher(tabId) {
@@ -1348,7 +1910,7 @@ function showHLSError(error) {
 /**
  * Downloads a DASH video (mpd) by fetching and concatenating segments
  */
-async function downloadDASHVideo(manifestUrl, button, batchMode = false) {
+async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitleTracks = []) {
   const originalText = button ? button.textContent : '';
   if (button) {
     button.textContent = 'Preparing...';
@@ -1372,6 +1934,7 @@ async function downloadDASHVideo(manifestUrl, button, batchMode = false) {
 
     const filename = generateFilename(manifestUrl, 'dash-video') + '.mp4';
     triggerBlobDownload(videoBlob, filename);
+    await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode);
 
     if (button) button.textContent = '✓ Downloaded';
   } catch (error) {

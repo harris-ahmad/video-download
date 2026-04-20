@@ -139,6 +139,26 @@ body {
   font-size: 12px;
 }
 
+.subtitle-hint {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(74, 144, 226, 0.28);
+  border-radius: 8px;
+  background: rgba(74, 144, 226, 0.08);
+  color: #cfe3ff;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.subtitle-hint strong {
+  color: #ffffff;
+}
+
+.subtitle-hint span {
+  color: #8fc2ff;
+  font-weight: 600;
+}
+
 /* Error State */
 .error-state {
   display: flex;
@@ -391,6 +411,70 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.subtitle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.subtitle-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  width: fit-content;
+}
+
+.subtitle-status.available {
+  background: rgba(74, 144, 226, 0.16);
+  color: #8fc2ff;
+  border: 1px solid rgba(74, 144, 226, 0.35);
+}
+
+.subtitle-status.unavailable {
+  background: rgba(136, 136, 136, 0.12);
+  color: #9a9a9a;
+  border: 1px solid rgba(136, 136, 136, 0.24);
+}
+
+.subtitle-btn {
+  background: #2f6fb7;
+  color: #fff;
+  border: 1px solid #3d82cc;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.subtitle-btn:hover:not(:disabled) {
+  background: #3d82cc;
+  transform: translateY(-1px);
+}
+
+.subtitle-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.subtitle-btn.recording {
+  background: #ff8c42;
+  border-color: #ff9f61;
+  color: #1a1a1a;
+}
+
+.subtitle-btn.recording:hover:not(:disabled) {
+  background: #ff9f61;
 }
 
 .video-meta {

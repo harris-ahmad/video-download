@@ -1,11 +1,19 @@
 const blobDataCache = new Map();
 let dynamicVideosCache = [];
 let currentUrl = location.href;
+const captionRecorderState = {
+    active: false,
+    buffer: [],
+    lastSnapshot: '',
+    observer: null,
+    intervalId: null
+};
 
 // Clear caches when navigating to a new page
 function clearCaches() {
   blobDataCache.clear();
   dynamicVideosCache = [];
+    stopCaptionRecording(true);
   console.log('Video caches cleared due to navigation');
 }
 
@@ -171,7 +179,10 @@ function detectVideos() {
           width: videoElement.videoWidth || videoElement.clientWidth || null,
           height: videoElement.videoHeight || videoElement.clientHeight || null,
           duration: duration,
-          thumbnail: captureThumbnail(videoElement)
+          pageUrl: location.href,
+          thumbnail: captureThumbnail(videoElement),
+          subtitleTracks: collectSubtitleTracks(videoElement, url, document),
+          transcriptText: collectPageTranscriptText(document)
       };
 
       if (type === 'blob') {
@@ -278,7 +289,9 @@ function setupDynamicObserver() {
                   height: videoElement.videoHeight || videoElement.clientHeight || null,
                   duration: duration,
                   dynamic: true,
-                  thumbnail: captureThumbnail(videoElement)
+                  pageUrl: location.href,
+                  thumbnail: captureThumbnail(videoElement),
+                  subtitleTracks: collectSubtitleTracks(videoElement, url, document)
               };
 
               dynamicVideosCache.push(videoData);
@@ -565,7 +578,6 @@ function resolveBlobDownloadSources(blobUrl) {
   const perfEntries = performance.getEntriesByType('resource');
   for (let i = perfEntries.length - 1; i >= 0; i--) {
       const entry = perfEntries[i];
-      const name = entry.name || '';
       const lower = name.toLowerCase();
 
       if (lower.includes('.m3u8') || lower.includes('.mpd') || lower.includes('.mp4') || lower.includes('.webm')) {
@@ -607,6 +619,462 @@ function buildHlsDownloadFilename(suggestedFilename) {
     }
 
     return `${raw}.ts`;
+}
+
+function collectSubtitleTracks(videoElement, baseUrl, doc = document) {
+    const tracks = [];
+    const seen = new Set();
+
+    const pushTrack = (track) => {
+        if (!track) return;
+
+        const src = typeof track.src === 'string' ? track.src.trim() : '';
+        const label = typeof track.label === 'string' ? track.label.trim() : '';
+        const language = typeof track.language === 'string'
+            ? track.language.trim()
+            : (typeof track.srclang === 'string' ? track.srclang.trim() : '');
+        const kind = typeof track.kind === 'string' ? track.kind.trim().toLowerCase() : '';
+        const resolvedSrc = src ? resolveMaybeRelativeUrl(src, baseUrl) : '';
+        const transcriptText = typeof track.transcriptText === 'string' ? track.transcriptText.trim() : '';
+        const key = `${resolvedSrc}|${label}|${language}|${kind}|${transcriptText.slice(0, 80)}`;
+
+        if ((!resolvedSrc && !transcriptText) || seen.has(key)) return;
+        seen.add(key);
+
+        tracks.push({
+            src: resolvedSrc,
+            label: label,
+            language: language,
+            kind: kind,
+            isDefault: Boolean(track.default),
+            mode: typeof track.mode === 'string' ? track.mode : '',
+            transcriptText: transcriptText
+        });
+    };
+
+    const trackElements = videoElement.querySelectorAll('track');
+    trackElements.forEach(trackEl => {
+        pushTrack({
+            src: trackEl.src,
+            label: trackEl.label,
+            language: trackEl.srclang,
+            kind: trackEl.kind,
+            default: trackEl.default
+        });
+    });
+
+    if (videoElement.textTracks && typeof videoElement.textTracks.length === 'number') {
+        Array.from(videoElement.textTracks).forEach(textTrack => {
+            const transcriptText = extractTextTrackTranscript(textTrack);
+            pushTrack({
+                src: textTrack.src || '',
+                label: textTrack.label || textTrack.language || '',
+                language: textTrack.language || '',
+                kind: textTrack.kind || '',
+                default: textTrack.mode === 'showing' || textTrack.mode === 'hidden',
+                transcriptText: transcriptText
+            });
+        });
+    }
+
+    const youtubeTracks = collectYouTubeCaptionTracks(doc, baseUrl);
+    youtubeTracks.forEach(pushTrack);
+
+    const pageTranscriptText = collectPageTranscriptText(doc);
+    if (pageTranscriptText) {
+        pushTrack({
+            src: '',
+            label: 'Transcript',
+            language: 'en',
+            kind: 'transcript',
+            default: true,
+            transcriptText: pageTranscriptText
+        });
+    }
+
+    return tracks;
+}
+
+function collectPageTranscriptText(doc) {
+    const visibleCaptionText = collectVisibleCaptionText(doc);
+    if (visibleCaptionText) {
+        return visibleCaptionText;
+    }
+
+    const visibleTranscriptText = collectTranscriptTextFromDom(doc);
+    if (visibleTranscriptText) {
+        return visibleTranscriptText;
+    }
+
+    const initialData = getYouTubeInitialData(doc);
+    const rendered = extractYouTubeTranscriptFromData(initialData);
+    if (rendered) {
+        return rendered;
+    }
+
+    return '';
+}
+
+function collectVisibleCaptionText(doc) {
+    const selectors = [
+        '#ytp-caption-window-container .ytp-caption-segment',
+        '.ytp-caption-window-container .ytp-caption-segment',
+        '.ytp-caption-segment'
+    ];
+
+    const texts = [];
+    const seen = new Set();
+
+    selectors.forEach(selector => {
+        doc.querySelectorAll(selector).forEach(node => {
+            const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text && !seen.has(text)) {
+                seen.add(text);
+                texts.push(text);
+            }
+        });
+    });
+
+    return texts.join('\n').trim();
+}
+
+function normalizeCaptionSnapshot(text) {
+    return String(text || '')
+      .replace(/\uFEFF/g, '')
+      .split(/\r?\n/)
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+}
+
+function getActiveCaptionVideoElement() {
+    const videos = Array.from(document.querySelectorAll('video'));
+    if (videos.length === 0) {
+        return null;
+    }
+
+    const visible = videos.find(video => {
+        const rect = video.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && window.getComputedStyle(video).visibility !== 'hidden';
+    });
+    if (visible) {
+        return visible;
+    }
+
+    const playing = videos.find(video => !video.paused && !video.ended);
+    if (playing) {
+        return playing;
+    }
+
+    return videos[0];
+}
+
+function formatCaptionTimestamp(seconds) {
+    const totalSeconds = Math.max(0, Number(seconds) || 0);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const wholeSeconds = Math.floor(totalSeconds % 60);
+    const milliseconds = Math.floor((totalSeconds - Math.floor(totalSeconds)) * 1000);
+
+    const pad = (value, size = 2) => String(value).padStart(size, '0');
+    return `${pad(hours)}:${pad(minutes)}:${pad(wholeSeconds)}.${pad(milliseconds, 3)}`;
+}
+
+function buildCaptionTranscriptLine(entry) {
+    if (!entry || !entry.text) {
+        return '';
+    }
+
+    const timestamp = formatCaptionTimestamp(entry.timeSeconds);
+    return `[${timestamp}] ${entry.text}`.trim();
+}
+
+function getCaptionRecorderTranscript() {
+    return captionRecorderState.buffer
+      .map(buildCaptionTranscriptLine)
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+}
+
+function recordCaptionSnapshot() {
+    if (!captionRecorderState.active) {
+        return false;
+    }
+
+    const snapshot = normalizeCaptionSnapshot(collectVisibleCaptionText(document));
+    if (!snapshot || snapshot === captionRecorderState.lastSnapshot) {
+        return false;
+    }
+
+    captionRecorderState.lastSnapshot = snapshot;
+    const video = getActiveCaptionVideoElement();
+    captionRecorderState.buffer.push({
+        text: snapshot,
+        timeSeconds: video && Number.isFinite(video.currentTime) ? video.currentTime : 0
+    });
+    return true;
+}
+
+function disconnectCaptionRecorderObservers() {
+    if (captionRecorderState.observer) {
+        captionRecorderState.observer.disconnect();
+        captionRecorderState.observer = null;
+    }
+
+    if (captionRecorderState.intervalId) {
+        clearInterval(captionRecorderState.intervalId);
+        captionRecorderState.intervalId = null;
+    }
+}
+
+function ensureCaptionRecorderObservers() {
+    if (captionRecorderState.observer || captionRecorderState.intervalId) {
+        return;
+    }
+
+    const observerTarget = document.querySelector('#ytp-caption-window-container') || document.body;
+    if (observerTarget) {
+        captionRecorderState.observer = new MutationObserver(() => {
+            recordCaptionSnapshot();
+        });
+
+        captionRecorderState.observer.observe(observerTarget, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true
+        });
+    }
+
+    captionRecorderState.intervalId = setInterval(() => {
+        recordCaptionSnapshot();
+    }, 250);
+}
+
+function startCaptionRecording() {
+    if (captionRecorderState.active) {
+        return getCaptionRecordingStatus();
+    }
+
+    captionRecorderState.active = true;
+    captionRecorderState.buffer = [];
+    captionRecorderState.lastSnapshot = '';
+    ensureCaptionRecorderObservers();
+    recordCaptionSnapshot();
+
+    return getCaptionRecordingStatus();
+}
+
+function stopCaptionRecording(reset = true) {
+    const transcriptText = getCaptionRecorderTranscript();
+    const lineCount = captionRecorderState.buffer.length;
+
+    captionRecorderState.active = false;
+    disconnectCaptionRecorderObservers();
+
+    if (reset) {
+        captionRecorderState.buffer = [];
+        captionRecorderState.lastSnapshot = '';
+    }
+
+    return {
+        active: false,
+        transcriptText,
+        lineCount
+    };
+}
+
+function getCaptionRecordingStatus() {
+    return {
+        active: captionRecorderState.active,
+        transcriptText: getCaptionRecorderTranscript(),
+        lineCount: captionRecorderState.buffer.length
+    };
+}
+
+function collectTranscriptTextFromDom(doc) {
+    const selectors = [
+        'ytd-transcript-segment-renderer',
+        'tp-yt-paper-item[role="button"]',
+        'tp-yt-paper-listbox ytd-transcript-segment-renderer'
+    ];
+
+    const lines = [];
+    selectors.forEach(selector => {
+        doc.querySelectorAll(selector).forEach(node => {
+            const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (text) {
+                lines.push(text);
+            }
+        });
+    });
+
+    return lines.join('\n').trim();
+}
+
+function getYouTubeInitialData(doc) {
+    if (!doc) return null;
+
+    const direct = window.ytInitialData || window.__ytInitialData || doc.defaultView?.ytInitialData || doc.defaultView?.__ytInitialData;
+    if (direct) return direct;
+
+    const scripts = Array.from(doc.scripts || []);
+    for (const script of scripts) {
+        const text = script.textContent || '';
+        if (!text.includes('ytInitialData')) continue;
+
+        const match = text.match(/ytInitialData\s*=\s*(\{.*?\});/s)
+          || text.match(/var\s+ytInitialData\s*=\s*(\{.*?\});/s);
+        if (!match) continue;
+
+        try {
+            return JSON.parse(match[1]);
+        } catch {
+            continue;
+        }
+    }
+
+    return null;
+}
+
+function extractYouTubeTranscriptFromData(data) {
+    const segments = [];
+
+    walkYouTubeObject(data, (value) => {
+        if (typeof value?.transcriptSegmentRenderer?.snippet?.simpleText === 'string') {
+            segments.push(value.transcriptSegmentRenderer.snippet.simpleText.trim());
+        }
+
+        if (typeof value?.transcriptSegmentRenderer?.snippet?.runs?.length === 'number') {
+            const text = value.transcriptSegmentRenderer.snippet.runs.map(run => run?.text || '').join('').trim();
+            if (text) segments.push(text);
+        }
+    });
+
+    return segments.join('\n').trim();
+}
+
+function walkYouTubeObject(value, visitor) {
+    if (!value || typeof value !== 'object') return;
+
+    visitor(value);
+
+    if (Array.isArray(value)) {
+        value.forEach(item => walkYouTubeObject(item, visitor));
+        return;
+    }
+
+    Object.values(value).forEach(child => walkYouTubeObject(child, visitor));
+}
+
+function extractTextTrackTranscript(textTrack) {
+    const cueSource = (textTrack && typeof textTrack === 'object') ? (textTrack.cues || textTrack.activeCues) : null;
+    if (!cueSource || typeof cueSource.length !== 'number') {
+        return '';
+    }
+
+    const lines = [];
+    for (const cue of Array.from(cueSource)) {
+        const text = typeof cue?.text === 'string'
+            ? cue.text.trim()
+            : (typeof cue?.getCueAsHTML === 'function' ? (cue.getCueAsHTML()?.textContent || '').trim() : '');
+        if (text) {
+            lines.push(text.replace(/\s+/g, ' '));
+        }
+    }
+
+    return lines.join('\n').trim();
+}
+
+function collectYouTubeCaptionTracks(doc, baseUrl) {
+    const tracks = [];
+    const playerResponse = getYouTubePlayerResponse(doc);
+    const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+    captionTracks.forEach(track => {
+        const src = typeof track?.baseUrl === 'string' ? track.baseUrl.trim() : '';
+        if (!src) return;
+
+        const language = typeof track?.languageCode === 'string' ? track.languageCode.trim() : '';
+        const label = getYouTubeCaptionLabel(track) || language || 'Subtitles';
+        const kind = typeof track?.kind === 'string' ? track.kind.trim().toLowerCase() : '';
+        const resolvedSrc = resolveMaybeRelativeUrl(ensureYouTubeCaptionFormat(src), baseUrl);
+
+        tracks.push({
+            src: resolvedSrc,
+            label,
+            language,
+            kind,
+            isDefault: Boolean(track?.isTranslatable) || /default/i.test(label)
+        });
+    });
+
+    return tracks;
+}
+
+function getYouTubePlayerResponse(doc) {
+    if (!doc) return null;
+
+    const direct = window.ytInitialPlayerResponse
+      || window.__ytInitialPlayerResponse
+      || doc.defaultView?.ytInitialPlayerResponse
+      || doc.defaultView?.__ytInitialPlayerResponse;
+    if (direct) return direct;
+
+    const scripts = Array.from(doc.scripts || []);
+    for (const script of scripts) {
+        const text = script.textContent || '';
+        if (!text.includes('ytInitialPlayerResponse')) continue;
+
+        const match = text.match(/ytInitialPlayerResponse\s*=\s*(\{.*?\});/s)
+          || text.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.*?\});/s);
+        if (!match) continue;
+
+        try {
+            return JSON.parse(match[1]);
+        } catch {
+            continue;
+        }
+    }
+
+    return null;
+}
+
+function getYouTubeCaptionLabel(track) {
+    const name = track?.name;
+    if (typeof name?.simpleText === 'string' && name.simpleText.trim()) {
+        return name.simpleText.trim();
+    }
+
+    if (Array.isArray(name?.runs)) {
+        const text = name.runs.map(run => run?.text || '').join('').trim();
+        if (text) return text;
+    }
+
+    return '';
+}
+
+function ensureYouTubeCaptionFormat(url) {
+    try {
+        const parsed = new URL(url);
+        if (!parsed.searchParams.has('fmt')) {
+          parsed.searchParams.set('fmt', 'vtt');
+        }
+        return parsed.toString();
+    } catch {
+        const separator = url.includes('?') ? '&' : '?';
+        return url.includes('fmt=') ? url : `${url}${separator}fmt=vtt`;
+    }
+}
+
+function resolveMaybeRelativeUrl(url, baseUrl) {
+    try {
+        return new URL(url, baseUrl).href;
+    } catch {
+        return url;
+    }
 }
 
 async function fetchMediaTextThroughBackground(url) {
@@ -692,6 +1160,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }).catch(error => {
           sendResponse({success: false, error: error.message});
       });
+      return true;
+  }
+
+  if (request.action === "startCaptionRecording") {
+      try {
+          const status = startCaptionRecording();
+          sendResponse({success: true, ...status});
+      } catch (error) {
+          sendResponse({success: false, error: error.message});
+      }
+      return true;
+  }
+
+  if (request.action === "stopCaptionRecording") {
+      try {
+          const result = stopCaptionRecording(true);
+          sendResponse({success: true, ...result});
+      } catch (error) {
+          sendResponse({success: false, error: error.message});
+      }
+      return true;
+  }
+
+  if (request.action === "getCaptionRecordingStatus") {
+      try {
+          sendResponse({success: true, ...getCaptionRecordingStatus()});
+      } catch (error) {
+          sendResponse({success: false, error: error.message});
+      }
       return true;
   }
 

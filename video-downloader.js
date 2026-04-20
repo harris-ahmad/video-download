@@ -144,9 +144,46 @@ function parseM3U8(manifestText, baseUrl) {
     // Parse variant playlists from master playlist
     const variants = [];
     const fallbackVariants = [];
+    const subtitleTracks = [];
+    const subtitleSeen = new Set();
+
+    const pushSubtitleTrack = (track) => {
+      if (!track?.url) return;
+
+      const key = `${track.url}|${track.label || ''}|${track.language || ''}`;
+      if (subtitleSeen.has(key)) return;
+      subtitleSeen.add(key);
+      subtitleTracks.push(track);
+    };
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
+
+      if (line.startsWith('#EXT-X-MEDIA')) {
+        const typeMatch = line.match(/TYPE=([^,]+)/);
+        const type = typeMatch ? typeMatch[1].replace(/"/g, '').trim().toUpperCase() : '';
+
+        if (type === 'SUBTITLES') {
+          const uriMatch = line.match(/URI="([^"]+)"/);
+          if (uriMatch && uriMatch[1]) {
+            const nameMatch = line.match(/NAME="([^"]+)"/);
+            const langMatch = line.match(/LANGUAGE="([^"]+)"/);
+            const defaultMatch = line.match(/DEFAULT=(YES|NO)/i);
+            const autoselectMatch = line.match(/AUTOSELECT=(YES|NO)/i);
+            const forcedMatch = line.match(/FORCED=(YES|NO)/i);
+
+            pushSubtitleTrack({
+              url: resolveUrl(uriMatch[1], basePath),
+              label: nameMatch ? nameMatch[1] : 'Subtitles',
+              language: langMatch ? langMatch[1] : '',
+              isDefault: defaultMatch ? defaultMatch[1].toUpperCase() === 'YES' : false,
+              autoSelect: autoselectMatch ? autoselectMatch[1].toUpperCase() === 'YES' : false,
+              forced: forcedMatch ? forcedMatch[1].toUpperCase() === 'YES' : false,
+              type: 'subtitle'
+            });
+          }
+        }
+      }
 
       if (line.startsWith('#EXT-X-STREAM-INF')) {
         // Extract bandwidth/quality info
@@ -188,6 +225,7 @@ function parseM3U8(manifestText, baseUrl) {
     return {
       isMasterPlaylist: true,
       variants: selectedVariants,
+      subtitleTracks: subtitleTracks,
       hasEncryption: hasEncryption,
       encryptionMethods: encryptionMethods
     };
@@ -221,6 +259,7 @@ function parseM3U8(manifestText, baseUrl) {
       isMasterPlaylist: false,
       segments: segmentUrls,
       initSegmentUrl: initSegmentUrl,
+      subtitleTracks: [],
       hasEncryption: hasEncryption,
       encryptionMethods: encryptionMethods
     };
@@ -493,7 +532,8 @@ async function getHLSVariants(manifestUrl, options = {}) {
         ...variant,
         segmentType: probe.segmentType,
         hasInitSegment: probe.hasInitSegment,
-        estimatedSegmentCount: probe.segmentCount
+        estimatedSegmentCount: probe.segmentCount,
+        subtitleTracks: parseResult.subtitleTracks || []
       };
     }));
 
@@ -511,7 +551,8 @@ async function getHLSVariants(manifestUrl, options = {}) {
     bandwidth: 0,
     resolution: 'unknown',
     isBest: true,
-    isLow: false
+    isLow: false,
+    subtitleTracks: parseResult.subtitleTracks || []
   }];
 }
 
