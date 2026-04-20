@@ -283,6 +283,18 @@ function formatFileSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
+function formatSpeed(bytesPerSecond) {
+  const speed = Number(bytesPerSecond || 0);
+  if (!Number.isFinite(speed) || speed <= 0) {
+    return '0 B/s';
+  }
+
+  if (speed < 1024) return `${speed.toFixed(0)} B/s`;
+  if (speed < 1024 * 1024) return `${(speed / 1024).toFixed(1)} KB/s`;
+  if (speed < 1024 * 1024 * 1024) return `${(speed / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${(speed / (1024 * 1024 * 1024)).toFixed(1)} GB/s`;
+}
+
 async function scanForVideos() {
   showState('loading');
   console.log('Starting video scan...');
@@ -955,15 +967,15 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
     const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
     const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
       if (button) {
-        if (status === 'Remuxing to MP4') {
-          button.textContent = 'Remuxing to MP4...';
+        if (status === 'Finalizing TS') {
+          button.textContent = 'Finalizing TS...';
         } else {
           button.textContent = `Downloading ${current}/${total}`;
         }
       }
     }, effectiveOptions);
 
-    const filename = generateFilename(manifestUrl, 'hls-video') + '.mp4';
+    const filename = generateFilename(manifestUrl, 'hls-video') + '.ts';
     triggerBlobDownload(videoBlob, filename);
     if (button) button.textContent = '✓ Done';
   } catch (error) {
@@ -1355,6 +1367,13 @@ async function updateQueueDisplay() {
       header.appendChild(status);
 
       queueItem.appendChild(header);
+
+      if (item.status === 'downloading') {
+        const speedRow = document.createElement('div');
+        speedRow.className = 'video-meta';
+        speedRow.textContent = `🚀 ${formatSpeed(item.speedBps)}${item.total > 0 ? ` • ${formatFileSize(item.progress)} / ${formatFileSize(item.total)}` : ''}`;
+        queueItem.appendChild(speedRow);
+      }
 
       if (item.status === 'downloading' && item.total > 0) {
         const progressBar = document.createElement('div');

@@ -77,11 +77,10 @@ async function downloadHLS(manifestUrl, onProgress, options = {}) {
     }
 
     if (onProgress) {
-      onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
+      onProgress(segmentUrls.length, segmentUrls.length, 'Finalizing TS');
     }
 
-    const mp4Blob = await finalizeHLSOutput(segments);
-    return mp4Blob;
+    return new Blob(segments, { type: 'video/mp2t' });
 
   } catch (error) {
     const wrappedError = new Error(`HLS download failed: ${error.message}`);
@@ -604,10 +603,10 @@ async function downloadHLSWithQuality(variantUrl, onProgress, options = {}) {
   }
 
   if (onProgress) {
-    onProgress(segmentUrls.length, segmentUrls.length, 'Remuxing to MP4');
+    onProgress(segmentUrls.length, segmentUrls.length, 'Finalizing TS');
   }
 
-  return await finalizeHLSOutput(segments);
+  return new Blob(segments, { type: 'video/mp2t' });
 }
 
 async function downloadSegmentsConcurrently(segmentUrls, concurrency, retries, onProgress, options = {}) {
@@ -909,92 +908,6 @@ async function fetchSegmentResponse(segmentUrl, fetchSegmentFn) {
   } finally {
     clearTimeout(timeout);
   }
-}
-
-async function transmuxToMP4(tsSegments) {
-  return new Promise(async (resolve) => {
-    try {
-      if (typeof muxjs === 'undefined') {
-        console.warn('mux.js not available, returning raw TS');
-        const combinedBlob = new Blob(tsSegments, { type: 'video/mp2t' });
-        resolve(combinedBlob);
-        return;
-      }
-
-      const transmuxer = new muxjs.mp4.Transmuxer({
-        keepOriginalTimestamps: false
-      });
-
-      const mp4Segments = [];
-      let hasInitSegment = false;
-
-      transmuxer.on('data', (segment) => {
-        if (segment.initSegment && !hasInitSegment) {
-          mp4Segments.push(new Uint8Array(segment.initSegment.byteLength));
-          mp4Segments[mp4Segments.length - 1].set(segment.initSegment);
-          hasInitSegment = true;
-        }
-
-        mp4Segments.push(new Uint8Array(segment.data.byteLength));
-        mp4Segments[mp4Segments.length - 1].set(segment.data);
-      });
-
-      transmuxer.on('done', () => {
-        if (mp4Segments.length === 0) {
-          const fallbackBlob = new Blob(tsSegments, { type: 'video/mp2t' });
-          resolve(fallbackBlob);
-          return;
-        }
-
-        const mp4Blob = new Blob(mp4Segments, { type: 'video/mp4' });
-        resolve(mp4Blob);
-      });
-
-      for (let i = 0; i < tsSegments.length; i++) {
-        const arrayBuffer = await tsSegments[i].arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
-        transmuxer.push(uint8Array);
-      }
-
-      transmuxer.flush();
-
-    } catch (error) {
-      console.error('Transmux failed:', error);
-      const combinedBlob = new Blob(tsSegments, { type: 'video/mp2t' });
-      resolve(combinedBlob);
-    }
-  });
-}
-
-async function finalizeHLSOutput(segments) {
-  if (!Array.isArray(segments) || segments.length === 0) {
-    throw new Error('No segments available to finalize');
-  }
-
-  const probeCount = Math.min(3, segments.length);
-  for (let i = 0; i < probeCount; i++) {
-    const buffer = await segments[i].arrayBuffer();
-    if (isLikelyFragmentedMp4Data(buffer)) {
-      return new Blob(segments, { type: 'video/mp4' });
-    }
-  }
-
-  return await transmuxToMP4(segments);
-}
-
-function isLikelyFragmentedMp4Data(buffer) {
-  const bytes = new Uint8Array(buffer || new ArrayBuffer(0));
-  if (bytes.length < 8) return false;
-
-  const maxOffset = Math.min(bytes.length - 8, 128);
-  for (let offset = 0; offset <= maxOffset; offset++) {
-    const marker = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
-    if (marker === 'ftyp' || marker === 'moof' || marker === 'styp' || marker === 'moov') {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 function isLikelyVideoVariant(resolution, codecs) {

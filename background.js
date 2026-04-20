@@ -157,6 +157,32 @@ chrome.webNavigation.onBeforeNavigate.addListener(details => {
 const downloadQueue = new Map();
 let downloadIdCounter = 0;
 
+function createDownloadSpeedTracker() {
+    return {
+        lastBytesReceived: 0,
+        lastSampleTime: Date.now(),
+        speedBps: 0
+    };
+}
+
+function updateDownloadSpeed(download, bytesReceived) {
+    const now = Date.now();
+    const elapsedMs = now - download.speedTracker.lastSampleTime;
+
+    if (elapsedMs > 0) {
+        const byteDelta = Math.max(0, bytesReceived - download.speedTracker.lastBytesReceived);
+        const speedBps = (byteDelta * 1000) / elapsedMs;
+
+        if (Number.isFinite(speedBps) && speedBps >= 0) {
+            download.speedTracker.speedBps = speedBps;
+        }
+    }
+
+    download.speedTracker.lastBytesReceived = bytesReceived;
+    download.speedTracker.lastSampleTime = now;
+    download.speedBps = download.speedTracker.speedBps;
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getNetworkVideos") {
         const tabId = request.tabId;
@@ -189,7 +215,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             filename: request.filename,
             status: 'downloading',
             progress: 0,
-            total: 0
+            total: 0,
+            speedBps: 0,
+            speedTracker: createDownloadSpeedTracker()
         };
 
         downloadQueue.set(downloadId, download);
@@ -248,15 +276,18 @@ function monitorDownload(downloadId, chromeDownloadId) {
                 return;
             }
 
+            updateDownloadSpeed(download, item.bytesReceived || 0);
             download.progress = item.bytesReceived;
             download.total = item.totalBytes;
 
             if (item.state === 'complete') {
                 download.status = 'completed';
+                download.speedBps = 0;
                 clearInterval(interval);
                 setTimeout(() => downloadQueue.delete(downloadId), 5000);
             } else if (item.state === 'interrupted') {
                 download.status = 'failed';
+                download.speedBps = 0;
                 clearInterval(interval);
             }
         });
