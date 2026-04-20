@@ -873,7 +873,20 @@ async function fetchSegmentWithRetry(segmentUrl, retries, options = {}) {
         throw httpError;
       }
 
-      return await response.blob();
+      const contentType = typeof response.headers?.get === 'function'
+        ? (response.headers.get('content-type') || '')
+        : '';
+
+      const blob = await response.blob();
+
+      if (!(await isLikelyMediaSegmentBlob(blob, segmentUrl, contentType))) {
+        const invalidError = new Error('Received non-media content for HLS segment');
+        invalidError.code = 'HLS_INVALID_SEGMENT';
+        invalidError.contentType = contentType;
+        throw invalidError;
+      }
+
+      return blob;
     } catch (error) {
       lastError = error;
 
@@ -889,6 +902,44 @@ async function fetchSegmentWithRetry(segmentUrl, retries, options = {}) {
 
 async function fetchInitSegmentBlob(initSegmentUrl, retries, options = {}) {
   return await fetchSegmentWithRetry(initSegmentUrl, retries, options);
+}
+
+async function isLikelyMediaSegmentBlob(blob, segmentUrl, contentType = '') {
+  const normalizedContentType = String(contentType || '').toLowerCase();
+
+  if (normalizedContentType.includes('text/') || normalizedContentType.includes('html') || normalizedContentType.includes('json') || normalizedContentType.includes('xml')) {
+    return false;
+  }
+
+  if (!blob || typeof blob.size !== 'number' || blob.size <= 0) {
+    return false;
+  }
+
+  const headerBytes = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+  const headerText = new TextDecoder('utf-8', { fatal: false }).decode(headerBytes).trim().toLowerCase();
+
+  if (headerText.startsWith('<!doctype') || headerText.startsWith('<html') || headerText.includes('<html') || headerText.startsWith('<?xml') || headerText.startsWith('{')) {
+    return false;
+  }
+
+  const lowerUrl = String(segmentUrl || '').toLowerCase();
+  const looksLikeTs = lowerUrl.includes('.ts') || lowerUrl.includes('format=ts') || lowerUrl.includes('mpegts');
+  const looksLikeFmp4 = lowerUrl.includes('.m4s') || lowerUrl.includes('.mp4') || lowerUrl.includes('format=mp4') || lowerUrl.includes('cmf');
+
+  if (looksLikeTs) {
+    return headerBytes.length >= 1 && headerBytes[0] === 0x47;
+  }
+
+  if (looksLikeFmp4) {
+    if (headerBytes.length < 8) {
+      return false;
+    }
+
+    const boxType = String.fromCharCode(headerBytes[4], headerBytes[5], headerBytes[6], headerBytes[7]).toLowerCase();
+    return boxType === 'ftyp' || boxType === 'moof' || boxType === 'mdat';
+  }
+
+  return blob.size >= 128;
 }
 
 async function fetchSegmentResponse(segmentUrl, fetchSegmentFn) {
@@ -962,5 +1013,5 @@ function triggerBlobDownload(blob, filename) {
   document.body.removeChild(a);
 
   // Clean up the object URL after a delay
-  setTimeout(() => URL.revokeObjectURL(url), 100);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }

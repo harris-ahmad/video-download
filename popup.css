@@ -36,6 +36,32 @@ body {
   color: #fff;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#convert-ts-btn {
+  background: #4A90E2;
+  border: 1px solid #357ABD;
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+#convert-ts-btn:hover {
+  background: #357ABD;
+}
+
+#convert-ts-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 #refresh-btn {
   background: #2a2a2a;
   border: 1px solid #444;

@@ -6,7 +6,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "vendor:update:mux": "node scripts/update-mux.js",
-    "vendor:update:mux:latest": "node scripts/update-mux.js"
+    "vendor:update:mux:latest": "node scripts/update-mux.js",
+    "native:install:macos": "bash native-helper/install-macos.sh",
+    "native:test": "node native-helper/test-host.js"
   },
   "repository": {
     "type": "git",

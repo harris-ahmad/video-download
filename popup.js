@@ -9,6 +9,7 @@ const modalClose = document.querySelector('.modal-close');
 const downloadQueueEl = document.getElementById('download-queue');
 const queueItemsEl = document.getElementById('queue-items');
 const clearQueueBtn = document.getElementById('clear-queue');
+const convertTsBtn = document.getElementById('convert-ts-btn');
 
 const tabButtons = document.querySelectorAll('.tab-btn');
 const networkListEl = document.getElementById('network-list');
@@ -75,6 +76,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
+  if (convertTsBtn) {
+    convertTsBtn.addEventListener('click', convertLatestTsToMp4);
+  }
+
   clearNetworkBtn.addEventListener('click', () => {
     networkHidden = true;
     networkListEl.innerHTML = '';
@@ -102,6 +107,101 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadSettings() {
   const stored = await chrome.storage.sync.get('settings');
   settings = { ...settings, ...(stored.settings || {}) };
+}
+
+async function convertLatestTsToMp4(options = {}) {
+  if (!convertTsBtn) return;
+
+  const silent = options.silent === true;
+
+  const originalText = convertTsBtn.textContent;
+  convertTsBtn.disabled = true;
+  convertTsBtn.textContent = 'Converting...';
+
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'convertLatestTsToMp4' });
+
+    if (!response?.success) {
+      const reason = response?.error || 'Unknown conversion error';
+      throw new Error(reason);
+    }
+
+    if (!silent) {
+      alert(`MP4 conversion completed successfully.\n\nOutput:\n${response.outputPath}`);
+    }
+  } catch (error) {
+    const message = String(error?.message || error);
+
+    if (message.includes('Specified native messaging host not found')) {
+      if (!silent) {
+        alert(
+          'Native helper is not installed yet.\n\n' +
+          'Install it once, then conversion is one-click:\n' +
+          '1) Open project terminal\n' +
+          '2) Run: npm run native:install:macos -- <your-extension-id>\n\n' +
+          'Find extension ID at chrome://extensions (Developer mode).'
+        );
+      }
+      return;
+    }
+
+    if (message.includes('Native host has exited')) {
+      if (!silent) {
+        alert(
+          'Native helper started but exited before responding.\n\n' +
+          'Please reinstall the helper launcher and reload the extension:\n' +
+          '1) npm run native:install:macos -- <your-extension-id>\n' +
+          '2) Reload extension in chrome://extensions\n\n' +
+          'Also ensure ffmpeg is installed and node is available.'
+        );
+      }
+      return;
+    }
+
+    if (!silent) {
+      alert(`TS→MP4 conversion failed:\n\n${message}`);
+    }
+  } finally {
+    convertTsBtn.disabled = false;
+    convertTsBtn.textContent = originalText;
+  }
+}
+
+async function startHLSDownloadInPage(variantUrl, manifestUrl, hlsOptions) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    throw new Error('No active tab found for persistent HLS download');
+  }
+
+  const taskId = `hls-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  console.log('[startHLSDownloadInPage] Sending task to tab', tab.id, 'variantUrl:', variantUrl);
+
+  const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
+
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    action: 'startHlsDownloadTask',
+    taskId: taskId,
+    variantUrl: variantUrl,
+    filename: filename,
+    segmentType: variant?.segmentType || 'unknown',
+    hlsConcurrency: hlsOptions?.hlsConcurrency
+  });
+
+  console.log('[startHLSDownloadInPage] Response from tab:', response);
+
+  if (!response?.accepted) {
+    throw new Error(response?.error || 'Tab did not accept HLS download task');
+  }
+
+  return { accepted: true, filename, taskId };
+}
+
+function buildHlsDownloadFilename(manifestUrl, segmentType = 'unknown') {
+  const raw = String(generateFilename(manifestUrl, 'hls-video') || '').trim() || `hls-video-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const withoutKnownVideoSuffix = raw.replace(/\.(mp4|ts|m3u8|mpd|webm|mov)$/i, '');
+  const extension = segmentType === 'fmp4' ? '.mp4' : '.ts';
+  return `${withoutKnownVideoSuffix}${extension}`;
 }
 
 /**
@@ -963,38 +1063,107 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
     button.disabled = true;
   }
 
+  console.log('[startHLSDownload] Starting with variant:', variant.label, 'manifestUrl:', manifestUrl);
+
+  if (variant?.segmentType === 'fmp4' && button) {
+    button.title = 'Fragmented MP4 stream detected; saving as .mp4 for compatibility';
+  }
+
   try {
     const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
-    const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
-      if (button) {
-        if (status === 'Finalizing TS') {
-          button.textContent = 'Finalizing TS...';
-        } else {
-          button.textContent = `Downloading ${current}/${total}`;
-        }
-      }
-    }, effectiveOptions);
+    console.log('[startHLSDownload] Calling startHLSDownloadInPage with variant.url:', variant.url);
+    await startHLSDownloadInPage(variant.url, manifestUrl, effectiveOptions);
 
-    const filename = generateFilename(manifestUrl, 'hls-video') + '.ts';
-    triggerBlobDownload(videoBlob, filename);
-    if (button) button.textContent = '✓ Done';
+    console.log('[startHLSDownload] Success, setting button to Started');
+    if (button) button.textContent = '✓ Started';
   } catch (error) {
-    console.error('Download failed:', error);
-    if (button) {
-      button.textContent = '✗ Failed';
-      button.className = 'download-btn error';
+    console.warn('[startHLSDownload] Persistent HLS download failed, trying fallback:', error);
+
+    let fallbackTaskId = null;
+
+    try {
+      const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
+      const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
+      fallbackTaskId = `hls-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+      chrome.runtime.sendMessage({
+        action: 'hlsTaskStart',
+        taskId: fallbackTaskId,
+        filename: filename,
+        variantUrl: variant.url
+      });
+
+      let lastProgressSentAt = 0;
+      let lastTotalSegments = 0;
+
+      console.log('[startHLSDownload] Fallback: downloading in popup context');
+      const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
+        if (Number.isFinite(Number(total)) && Number(total) >= 0) {
+          lastTotalSegments = Number(total);
+        }
+
+        const now = Date.now();
+        const shouldSend = now - lastProgressSentAt >= 200 || current === total;
+        if (shouldSend) {
+          lastProgressSentAt = now;
+          chrome.runtime.sendMessage({
+            action: 'hlsTaskProgress',
+            taskId: fallbackTaskId,
+            current: current,
+            total: total,
+            status: status || 'Downloading segments'
+          });
+        }
+
+        if (button) {
+          if (status === 'Finalizing TS') {
+            button.textContent = 'Finalizing TS...';
+          } else {
+            button.textContent = 'Downloading...';
+          }
+        }
+      }, effectiveOptions);
+
+      console.log('[startHLSDownload] Fallback download complete, triggering download');
+      triggerBlobDownload(videoBlob, filename);
+      chrome.runtime.sendMessage({
+        action: 'hlsTaskComplete',
+        taskId: fallbackTaskId,
+        totalSegments: lastTotalSegments,
+        statusText: 'Saved to Downloads'
+      });
+      if (button) button.textContent = '✓ Done';
+    } catch (fallbackError) {
+      console.error('[startHLSDownload] Download failed:', fallbackError);
+
+      if (fallbackTaskId) {
+        chrome.runtime.sendMessage({
+          action: 'hlsTaskFailed',
+          taskId: fallbackTaskId,
+          error: String(fallbackError?.message || fallbackError)
+        });
+      }
+
+      if (button) {
+        button.textContent = '✗ Failed';
+        button.className = 'download-btn error';
+      }
+      if (!batchMode) {
+        showHLSError(fallbackError);
+      }
+      throw fallbackError;
     }
-    if (!batchMode) {
-      showHLSError(error);
-    }
-    throw error;
   } finally {
     if (button) {
-      setTimeout(() => {
-        button.textContent = 'Download';
-        button.disabled = false;
-        button.className = 'download-btn';
-      }, 2000);
+      // Only reset if it failed (error state)
+      // Don't reset on success—let "✓ Started" or "✓ Done" remain visible
+      if (button.className === 'download-btn error') {
+        setTimeout(() => {
+          button.textContent = 'Download';
+          button.disabled = false;
+          button.className = 'download-btn';
+        }, 2000);
+      }
     }
   }
 }
@@ -1371,8 +1540,17 @@ async function updateQueueDisplay() {
       if (item.status === 'downloading') {
         const speedRow = document.createElement('div');
         speedRow.className = 'video-meta';
-        speedRow.textContent = `🚀 ${formatSpeed(item.speedBps)}${item.total > 0 ? ` • ${formatFileSize(item.progress)} / ${formatFileSize(item.total)}` : ''}`;
+        if (item.progressUnit === 'segments') {
+          speedRow.textContent = `🎞️ ${item.progress || 0}/${item.total || 0} segments${item.statusText ? ` • ${item.statusText}` : ''}`;
+        } else {
+          speedRow.textContent = `🚀 ${formatSpeed(item.speedBps)}${item.total > 0 ? ` • ${formatFileSize(item.progress)} / ${formatFileSize(item.total)}` : ''}`;
+        }
         queueItem.appendChild(speedRow);
+      } else if (item.statusText) {
+        const statusDetail = document.createElement('div');
+        statusDetail.className = 'video-meta';
+        statusDetail.textContent = item.statusText;
+        queueItem.appendChild(statusDetail);
       }
 
       if (item.status === 'downloading' && item.total > 0) {

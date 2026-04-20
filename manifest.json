@@ -10,7 +10,8 @@
     "downloads",
     "webRequest",
     "webNavigation",
-    "storage"
+    "storage",
+    "nativeMessaging"
   ],
 
   "host_permissions": [
@@ -24,7 +25,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["video-downloader.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

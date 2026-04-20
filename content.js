@@ -176,15 +176,6 @@ function detectVideos() {
 
       if (type === 'blob') {
           videoData.blobCaptured = false;
-
-          captureBlobData(url, videoElement).then(dataUrl => {
-              if (dataUrl) {
-                  blobDataCache.set(url, dataUrl);
-                  videoData.blobCaptured = true;
-              }
-          }).catch(error => {
-              console.warn('Failed to capture blob:', error);
-          });
       }
 
       videos.push(videoData);
@@ -294,14 +285,6 @@ function setupDynamicObserver() {
 
               if (videoData.type === 'blob') {
                   videoData.blobCaptured = false;
-                  captureBlobData(url, videoElement).then(dataUrl => {
-                      if (dataUrl) {
-                          blobDataCache.set(url, dataUrl);
-                          videoData.blobCaptured = true;
-                      }
-                  }).catch(error => {
-                      console.warn('Failed to capture blob:', error);
-                  });
               }
           }
       });
@@ -614,6 +597,48 @@ function findVideoElementByBlobUrl(blobUrl) {
   return null;
 }
 
+function buildHlsDownloadFilename(suggestedFilename) {
+    const raw = typeof suggestedFilename === 'string' && suggestedFilename.trim()
+        ? suggestedFilename.trim()
+        : `hls-video-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+
+    if (/\.(mp4|ts|m3u8|mpd|webm|mov)$/i.test(raw)) {
+        return raw;
+    }
+
+    return `${raw}.ts`;
+}
+
+async function fetchMediaTextThroughBackground(url) {
+    const response = await chrome.runtime.sendMessage({ action: 'fetchMediaText', url });
+
+    if (!response?.success) {
+        throw new Error(response?.error || 'Manifest request failed (network error)');
+    }
+
+    return new Response(response.text || '', {
+        status: typeof response.status === 'number' ? response.status : 200,
+        headers: {
+            'content-type': response.contentType || 'application/vnd.apple.mpegurl'
+        }
+    });
+}
+
+async function fetchMediaBlobThroughBackground(url) {
+    const response = await chrome.runtime.sendMessage({ action: 'fetchMediaBlob', url });
+
+    if (!response?.success) {
+        throw new Error(response?.error || 'Segment request failed (network error)');
+    }
+
+    return new Response(response.buffer || new ArrayBuffer(0), {
+        status: typeof response.status === 'number' ? response.status : 200,
+        headers: {
+            'content-type': response.contentType || 'application/octet-stream'
+        }
+    });
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "getVideos") {
       try {
@@ -667,6 +692,85 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }).catch(error => {
           sendResponse({success: false, error: error.message});
       });
+      return true;
+  }
+
+  if (request.action === "startHlsDownloadTask") {
+      const taskId = request.taskId || `hls-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const variantUrl = request.variantUrl;
+      const filename = buildHlsDownloadFilename(request.filename);
+      const hlsConcurrency = Number(request.hlsConcurrency);
+
+      if (!variantUrl || typeof variantUrl !== 'string') {
+          sendResponse({accepted: false, error: 'variantUrl is required'});
+          return true;
+      }
+
+      if (typeof downloadHLSWithQuality !== 'function' || typeof triggerBlobDownload !== 'function') {
+          sendResponse({accepted: false, error: 'HLS downloader is not loaded in content context'});
+          return true;
+      }
+
+      sendResponse({accepted: true, taskId: taskId});
+
+      (async () => {
+          try {
+              console.log('[HLS] Starting download from:', variantUrl);
+              chrome.runtime.sendMessage({
+                  action: 'hlsTaskStart',
+                  taskId: taskId,
+                  filename: filename,
+                  variantUrl: variantUrl
+              });
+
+              let lastProgressSentAt = 0;
+              let lastTotalSegments = 0;
+              const blob = await downloadHLSWithQuality(variantUrl, (current, total, status) => {
+                  if (Number.isFinite(Number(total)) && Number(total) >= 0) {
+                      lastTotalSegments = Number(total);
+                  }
+
+                  const now = Date.now();
+                  const shouldSend = now - lastProgressSentAt >= 200 || current === total;
+
+                  if (!shouldSend) {
+                      return;
+                  }
+
+                  lastProgressSentAt = now;
+                  chrome.runtime.sendMessage({
+                      action: 'hlsTaskProgress',
+                      taskId: taskId,
+                      current: current,
+                      total: total,
+                      status: status || 'Downloading segments'
+                  });
+              }, {
+                  hlsConcurrency: Number.isFinite(hlsConcurrency) ? hlsConcurrency : undefined,
+                  fetchTextFn: fetchMediaTextThroughBackground,
+                  fetchSegmentFn: fetchMediaBlobThroughBackground
+              });
+              
+              console.log('[HLS] Download complete, blob size:', blob.size, 'bytes');
+              triggerBlobDownload(blob, filename);
+
+              chrome.runtime.sendMessage({
+                  action: 'hlsTaskComplete',
+                  taskId: taskId,
+                  totalSegments: lastTotalSegments,
+                  statusText: 'Saved to Downloads'
+              });
+          } catch (error) {
+              console.error('[HLS] Content-side HLS download task failed:', error);
+              const errorMessage = String(error?.message || error || 'Unknown HLS error');
+              chrome.runtime.sendMessage({
+                  action: 'hlsTaskFailed',
+                  taskId: taskId,
+                  error: errorMessage
+              });
+          }
+      })();
+
       return true;
   }
 
