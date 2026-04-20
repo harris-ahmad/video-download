@@ -4,7 +4,9 @@
   "description": "download every video that you see online! nothing to worry. it's free, you don't pay anything.",
   "main": "content.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "vendor:update:mux": "node scripts/update-mux.js",
+    "vendor:update:mux:latest": "node scripts/update-mux.js"
   },
   "repository": {
     "type": "git",
