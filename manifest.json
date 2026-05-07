@@ -11,7 +11,8 @@
     "webRequest",
     "webNavigation",
     "storage",
-    "nativeMessaging"
+    "nativeMessaging",
+    "offscreen"
   ],
 
   "host_permissions": [

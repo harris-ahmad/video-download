@@ -167,34 +167,15 @@ async function convertLatestTsToMp4(options = {}) {
   }
 }
 
-async function startHLSDownloadInPage(variantUrl, manifestUrl, hlsOptions) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) {
-    throw new Error('No active tab found for persistent HLS download');
-  }
-
-  const taskId = `hls-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-  console.log('Sending task to tab', tab.id, 'variantUrl:', variantUrl);
-
-  const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
-
-  const response = await chrome.tabs.sendMessage(tab.id, {
-    action: 'startHlsDownloadTask',
-    taskId: taskId,
-    variantUrl: variantUrl,
-    filename: filename,
-    segmentType: variant?.segmentType || 'unknown',
-    hlsConcurrency: hlsOptions?.hlsConcurrency
+async function startBackgroundStreamDownload(payload){
+  const response = await chrome.runtime.sendMessage({
+    action:'startBackgroundStreamDownload',
+    ...payload
   });
-
-  console.log('Response from tab:', response);
-
-  if (!response?.accepted) {
-    throw new Error(response?.error || 'Tab did not accept HLS download task');
+  if (!response?.success) {
+    throw new Error(response?.error || 'Failed to start background stream download');
   }
-
-  return { accepted: true, filename, taskId };
+  return response;
 }
 
 function buildHlsDownloadFilename(manifestUrl, segmentType = 'unknown') {
@@ -1210,89 +1191,29 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
 
   try {
     const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
-    console.log('Calling startHLSDownloadInPage with variant.url:', variant.url);
-    await startHLSDownloadInPage(variant.url, manifestUrl, effectiveOptions);
+    const taskId = `hls-bg-${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+    const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
 
-    console.log('Success, setting button to Started');
-    if (button) button.textContent = 'Started';
-    await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode, effectiveOptions);
+    await startBackgroundStreamDownload({
+      taskId:taskId,
+      streamType:'hls',
+      manifestUrl:manifestUrl,
+      variantUrl:variant.url,
+      filename:filename,
+      hlsConcurrency:effectiveOptions?.hlsConcurrency,
+      saveAs:batchMode ? false : settings.saveAs
+    });
+
+    if (button)button.textContent='Queued';
+    await downloadSubtitleCompanion(manifestUrl,subtitleTracks,button,batchMode,effectiveOptions);
   } catch (error) {
-    console.warn('Persistent HLS download failed, trying fallback:', error);
-
-    let fallbackTaskId = null;
-
-    try {
-      const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
-      const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
-      fallbackTaskId = `hls-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-      chrome.runtime.sendMessage({
-        action: 'hlsTaskStart',
-        taskId: fallbackTaskId,
-        filename: filename,
-        variantUrl: variant.url
-      });
-
-      let lastProgressSentAt = 0;
-      let lastTotalSegments = 0;
-
-      console.log('Fallback: downloading in popup context');
-      const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
-        if (Number.isFinite(Number(total)) && Number(total) >= 0) {
-          lastTotalSegments = Number(total);
-        }
-
-        const now = Date.now();
-        const shouldSend = now - lastProgressSentAt >= 200 || current === total;
-        if (shouldSend) {
-          lastProgressSentAt = now;
-          chrome.runtime.sendMessage({
-            action: 'hlsTaskProgress',
-            taskId: fallbackTaskId,
-            current: current,
-            total: total,
-            status: status || 'Downloading segments'
-          });
-        }
-
-        if (button) {
-          if (status === 'Finalizing TS') {
-            button.textContent = 'Finalizing TS';
-          } else {
-            button.textContent = 'Downloading';
-          }
-        }
-      }, effectiveOptions);
-
-      console.log('[startHLSDownload] Fallback download complete, triggering download');
-      triggerBlobDownload(videoBlob, filename);
-      chrome.runtime.sendMessage({
-        action: 'hlsTaskComplete',
-        taskId: fallbackTaskId,
-        totalSegments: lastTotalSegments,
-        statusText: 'Saved to Downloads'
-      });
-      if (button) button.textContent = 'Done';
-    } catch (fallbackError) {
-      console.error('Download failed:', fallbackError);
-
-      if (fallbackTaskId) {
-        chrome.runtime.sendMessage({
-          action: 'hlsTaskFailed',
-          taskId: fallbackTaskId,
-          error: String(fallbackError?.message || fallbackError)
-        });
-      }
-
-      if (button) {
-        button.textContent = '✗ Failed';
-        button.className = 'download-btn error';
-      }
-      if (!batchMode) {
-        showHLSError(fallbackError);
-      }
-      throw fallbackError;
+    console.error('HLS background download failed:',error);
+    if (button) {
+      button.textContent='✗ Failed';
+      button.className='download-btn error';
     }
+    if (!batchMode) showHLSError(error);
+    throw error;
   } finally {
     if (button) {
       if (button.className === 'download-btn error') {
@@ -1897,25 +1818,17 @@ async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitl
   }
 
   try {
-    const videoBlob = await downloadDASH(manifestUrl, (current, total, status) => {
-      if (button) {
-        if (status === 'Muxing MP4') {
-          button.textContent = 'Muxing MP4';
-        } else if (status === 'Downloading video') {
-          button.textContent = `Video ${current}/${total}`;
-        } else if (status === 'Downloading audio') {
-          button.textContent = `Audio ${current}/${total}`;
-        } else {
-          button.textContent = `${current}/${total}`;
-        }
-      }
+    const taskId=`dash-bg-${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+    const filename=generateFilename(manifestUrl,'dash-video') + '.mp4';
+    await startBackgroundStreamDownload({
+      taskId:taskId,
+      streamType:'dash',
+      manifestUrl:manifestUrl,
+      filename:filename,
+      saveAs:batchMode ? false : settings.saveAs
     });
-
-    const filename = generateFilename(manifestUrl, 'dash-video') + '.mp4';
-    triggerBlobDownload(videoBlob, filename);
-    await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode);
-
-    if (button) button.textContent = 'Downloaded';
+    await downloadSubtitleCompanion(manifestUrl,subtitleTracks,button,batchMode);
+    if (button) button.textContent = 'Queued';
   } catch (error) {
     console.error('DASH download error:', error);
     if (button) {

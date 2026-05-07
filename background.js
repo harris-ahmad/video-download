@@ -2,6 +2,7 @@ const networkVideos = new Map();
 const networkRequests = new Map();
 const NATIVE_HELPER_HOST = 'com.harrisahmad.video_download_helper';
 const DOWNLOAD_QUEUE_STORAGE_KEY = 'downloadQueueSnapshot';
+const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 
 const MAX_URLS_PER_TAB = 50;
 const MAX_REQUESTS_PER_TAB = 100;
@@ -250,6 +251,25 @@ async function fetchMediaBlob(url) {
         buffer,
         contentType: response.headers.get('content-type') || ''
     };
+}
+
+async function ensureOffscreenDocument(){
+    if (!chrome.offscreen?.createDocument) {
+        throw new Error('Offscreen API is not available');
+    }
+
+    const offscreenUrl=chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
+    const existing=await chrome.runtime.getContexts({
+        contextTypes:['OFFSCREEN_DOCUMENT'],
+        documentUrls:[offscreenUrl]
+    });
+    if (existing.length>0) return;
+
+    await chrome.offscreen.createDocument({
+        url:OFFSCREEN_DOCUMENT_PATH,
+        reasons:['BLOBS'],
+        justification:'Run media segment downloads outside tab/popup lifetime'
+    });
 }
 
 function buildDownloadSnapshot(download) {
@@ -755,6 +775,61 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
         })();
 
+        return true;
+    }
+
+    if (request.action === "startBackgroundStreamDownload") {
+        (async () => {
+            try {
+                await ensureQueueHydrated();
+                await ensureOffscreenDocument();
+
+                if (!request.taskId || !request.filename) {
+                    sendResponse({success:false,error:'taskId and filename are required'});
+                    return;
+                }
+
+                let queueId=findQueueIdByHlsTaskId(request.taskId);
+                if (!queueId) {
+                    queueId=++downloadIdCounter;
+                    downloadQueue.set(queueId,{
+                        id:queueId,
+                        url:request.variantUrl || request.manifestUrl || '',
+                        filename:request.filename,
+                        status:'downloading',
+                        statusText: request.streamType === 'dash' ? 'Preparing DASH task' : 'Starting HLS task',
+                        progress:0,
+                        total:0,
+                        speedBps:0,
+                        progressUnit:'segments',
+                        hlsTaskId:request.taskId,
+                        speedTracker:createDownloadSpeedTracker()
+                    });
+                    hlsTaskToQueueId.set(request.taskId,queueId);
+                    scheduleQueuePersist();
+                }
+
+                const offscreenResult = await chrome.runtime.sendMessage({
+                    action:'offscreenDownloadStream',
+                    taskId:request.taskId,
+                    streamType:request.streamType || 'hls',
+                    manifestUrl:request.manifestUrl || '',
+                    variantUrl:request.variantUrl || '',
+                    filename:request.filename,
+                    hlsConcurrency:request.hlsConcurrency,
+                    saveAs:Boolean(request.saveAs)
+                });
+
+                if (!offscreenResult?.accepted) {
+                    sendResponse({success:false,error:offscreenResult?.error || 'Offscreen task was rejected'});
+                    return;
+                }
+
+                sendResponse({success:true,taskId:request.taskId,queueId:queueId});
+            } catch (error) {
+                sendResponse({success:false,error:error.message});
+            }
+        })();
         return true;
     }
 
