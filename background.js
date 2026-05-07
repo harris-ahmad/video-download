@@ -281,6 +281,7 @@ function buildDownloadSnapshot(download) {
         progress: download.progress,
         total: download.total,
         speedBps: download.speedBps,
+        errorCode: download.errorCode || null,
         chromeDownloadId: download.chromeDownloadId || null,
         speedTracker: download.speedTracker ? {
             lastBytesReceived: download.speedTracker.lastBytesReceived,
@@ -299,6 +300,7 @@ function restoreDownloadSnapshot(snapshot) {
         progress: snapshot.progress || 0,
         total: snapshot.total || 0,
         speedBps: snapshot.speedBps || 0,
+        errorCode: snapshot.errorCode || null,
         chromeDownloadId: snapshot.chromeDownloadId || null,
         speedTracker: createDownloadSpeedTracker()
     };
@@ -766,7 +768,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 }
 
                 queueItem.status = 'failed';
-                queueItem.statusText = request.error || 'HLS task failed';
+                queueItem.errorCode = typeof request.errorCode === 'string' ? request.errorCode : null;
+                if (queueItem.errorCode === 'HLS_ENCRYPTED') {
+                    queueItem.statusText = 'DRM/encrypted stream: this video is protected and cannot be downloaded by the extension.';
+                } else {
+                    queueItem.statusText = request.error || 'HLS task failed';
+                }
                 queueItem.progressUnit = 'segments';
                 scheduleQueuePersist();
                 sendResponse({success: true});

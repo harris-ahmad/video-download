@@ -1764,9 +1764,9 @@ function showHLSError(error) {
       : 'Unknown';
 
     alert(
-      'This HLS stream is encrypted and cannot be downloaded directly by this extension.\n\n' +
+      'This stream appears DRM-protected/encrypted and cannot be downloaded by this extension.\n\n' +
       `Encryption method(s): ${methods}\n\n` +
-      'Tip: This usually requires decryption keys from the player session.'
+      'Why this happens: protected services require license/decryption keys that are not exposed for extension downloads.'
     );
     return;
   }

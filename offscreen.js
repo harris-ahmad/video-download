@@ -93,7 +93,7 @@ async function runTask(request){
       statusText:'Saved to Downloads'
     });
   } catch (error) {
-    await reportFailed(taskId,String(error?.message || error || 'Unknown error'));
+    await reportFailed(taskId,error);
   }
 }
 
@@ -110,11 +110,15 @@ async function reportProgress(taskId,current,total,status){
 }
 
 async function reportFailed(taskId,error){
+  const errorCode = typeof error?.code === 'string' ? error.code : null;
+  const errorMessage = String(error?.message || error || 'Unknown error');
+
   try {
     await chrome.runtime.sendMessage({
       action:'hlsTaskFailed',
       taskId:taskId,
-      error:error
+      error:errorMessage,
+      errorCode:errorCode
     });
   } catch {}
 }
