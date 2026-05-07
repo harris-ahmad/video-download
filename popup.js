@@ -116,7 +116,7 @@ async function convertLatestTsToMp4(options = {}) {
 
   const originalText = convertTsBtn.textContent;
   convertTsBtn.disabled = true;
-  convertTsBtn.textContent = 'Converting...';
+  convertTsBtn.textContent = 'Converting';
 
   try {
     const response = await chrome.runtime.sendMessage({ action: 'convertLatestTsToMp4' });
