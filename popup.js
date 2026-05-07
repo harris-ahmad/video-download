@@ -19,6 +19,8 @@ const networkFilterEl = document.getElementById('network-filter');
 const sizeFilterEl = document.getElementById('size-filter');
 const videosBadgeEl = document.getElementById('videos-badge');
 const networkBadgeEl = document.getElementById('network-badge');
+const statsTotalEl = document.getElementById('stats-total');
+const statsSelectedEl = document.getElementById('stats-selected');
 
 let networkRefreshInterval = null;
 let networkHidden = false;
@@ -446,6 +448,9 @@ async function scanForVideos() {
 
     if (allVideos.length === 0) {
       console.log('No videos found, showing empty state');
+      updateVideoStats(0, 0);
+      selectedVideos.clear();
+      updateBatchControls();
       showState('empty');
     } else {
       console.log('Displaying', allVideos.length, 'videos');
@@ -581,6 +586,7 @@ function displayVideos(videos) {
   videoListEl.innerHTML = '';
   allVideos = videos;
   selectedVideos.clear();
+  updateVideoStats(videos.length, 0);
 
   videosBadgeEl.textContent = videos.length;
   if (videos.length > 0) {
@@ -602,6 +608,16 @@ function displayVideos(videos) {
   });
 
   updateBatchControls();
+}
+
+function updateVideoStats(totalCount = 0, selectedCount = 0) {
+  if (statsTotalEl) {
+    statsTotalEl.textContent = String(Math.max(0, Number(totalCount) || 0));
+  }
+
+  if (statsSelectedEl) {
+    statsSelectedEl.textContent = String(Math.max(0, Number(selectedCount) || 0));
+  }
 }
 
 /**
@@ -2181,6 +2197,8 @@ function updateBatchControls() {
       downloadSelectedBtn.disabled = true;
     }
   }
+
+  updateVideoStats(allVideos.length, selectedVideos.size);
 }
 
 async function downloadSelectedVideos() {
