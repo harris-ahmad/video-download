@@ -175,7 +175,7 @@ async function startHLSDownloadInPage(variantUrl, manifestUrl, hlsOptions) {
 
   const taskId = `hls-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-  console.log('[startHLSDownloadInPage] Sending task to tab', tab.id, 'variantUrl:', variantUrl);
+  console.log('Sending task to tab', tab.id, 'variantUrl:', variantUrl);
 
   const filename = buildHlsDownloadFilename(manifestUrl, variant?.segmentType);
 
@@ -188,7 +188,7 @@ async function startHLSDownloadInPage(variantUrl, manifestUrl, hlsOptions) {
     hlsConcurrency: hlsOptions?.hlsConcurrency
   });
 
-  console.log('[startHLSDownloadInPage] Response from tab:', response);
+  console.log('Response from tab:', response);
 
   if (!response?.accepted) {
     throw new Error(response?.error || 'Tab did not accept HLS download task');
