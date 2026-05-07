@@ -123,7 +123,6 @@ function getMediaType(url, contentType) {
 }
 
 function getVideoType(url) {
-    // Extract pathname for accurate type detection
     let pathname;
     try {
         const urlObj = new URL(url);

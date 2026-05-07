@@ -1,16 +1,9 @@
-// video-downloader.js - Handles advanced video downloads (HLS, DASH)
-
 const DEFAULT_HLS_SEGMENT_CONCURRENCY = 16;
 const MAX_HLS_SEGMENT_CONCURRENCY = 32;
 const HLS_SEGMENT_RETRIES = 2;
 const HLS_SEGMENT_TIMEOUT_MS = 15000;
 
-/**
- * Downloads an HLS video by parsing the m3u8 manifest and downloading all segments
- * @param {string} manifestUrl - URL to the .m3u8 manifest file
- * @param {Function} onProgress - Callback for progress updates (current, total)
- * @returns {Promise<Blob>} - Combined video blob
- */
+
 async function downloadHLS(manifestUrl, onProgress, options = {}) {
   try {
     const manifestText = await fetchHLSPlaylistText(manifestUrl, options, 'Manifest');
@@ -94,21 +87,13 @@ async function downloadHLS(manifestUrl, onProgress, options = {}) {
   }
 }
 
-/**
- * Parses an m3u8 manifest file to extract segment URLs or variant playlists
- * @param {string} manifestText - The m3u8 file content
- * @param {string} baseUrl - Base URL for resolving relative paths
- * @returns {Object} - { isMasterPlaylist: boolean, segments?: Array, variants?: Array }
- */
 function parseM3U8(manifestText, baseUrl) {
-  // Validate that this is actually an M3U8 playlist, not HTML or other content
   if (!manifestText || typeof manifestText !== 'string') {
     throw new Error('Invalid manifest: not a string');
   }
   
   const trimmedText = manifestText.trim();
   if (!trimmedText.startsWith('#EXTM3U')) {
-    // Check if we got HTML instead
     if (trimmedText.startsWith('<') || trimmedText.includes('<!DOCTYPE')) {
       throw new Error('Invalid manifest: received HTML instead of M3U8 playlist');
     }
@@ -133,15 +118,11 @@ function parseM3U8(manifestText, baseUrl) {
 
   const hasEncryption = encryptionMethods.length > 0;
 
-  // Get base URL for resolving relative paths
   const urlObj = new URL(baseUrl);
   const basePath = urlObj.origin + urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
-
-  // Check if this is a master playlist (contains #EXT-X-STREAM-INF)
   const isMasterPlaylist = manifestText.includes('#EXT-X-STREAM-INF');
 
   if (isMasterPlaylist) {
-    // Parse variant playlists from master playlist
     const variants = [];
     const fallbackVariants = [];
     const subtitleTracks = [];
@@ -186,7 +167,6 @@ function parseM3U8(manifestText, baseUrl) {
       }
 
       if (line.startsWith('#EXT-X-STREAM-INF')) {
-        // Extract bandwidth/quality info
         const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
         const bandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1]) : 0;
 
@@ -197,7 +177,6 @@ function parseM3U8(manifestText, baseUrl) {
         const codecs = codecsMatch ? codecsMatch[1] : '';
         const isLikelyVideo = isLikelyVideoVariant(resolution, codecs);
 
-        // Next non-comment line is the variant URL
         for (let j = i + 1; j < lines.length; j++) {
           if (lines[j] && !lines[j].startsWith('#')) {
             const variantUrl = resolveUrl(lines[j], basePath);
@@ -230,7 +209,6 @@ function parseM3U8(manifestText, baseUrl) {
       encryptionMethods: encryptionMethods
     };
   } else {
-    // Parse segment URLs from variant playlist
     const segmentUrls = [];
     let initSegmentUrl = null;
 
@@ -245,12 +223,9 @@ function parseM3U8(manifestText, baseUrl) {
         continue;
       }
 
-      // Skip comments and empty lines
       if (!line || line.startsWith('#')) {
         continue;
       }
-
-      // This is a segment URL
       const segmentUrl = resolveUrl(line, basePath);
       segmentUrls.push(segmentUrl);
     }
@@ -629,8 +604,6 @@ async function downloadHLSWithQuality(variantUrl, onProgress, options = {}) {
       hlsOptions
     );
   } catch (error) {
-    // Don't try variant refresh - it's unreliable when the manifest fetch is problematic
-    // The multi-pass recovery in downloadSegmentsConcurrently should be sufficient
     throw error;
   }
 
@@ -857,7 +830,6 @@ function extractPlaylistUrlFromHtml(html, baseUrl) {
       candidates.push(decodeURIComponent(directUrl));
     }
   } catch {
-    // Ignore invalid base URLs
   }
 
   const regexes = [
@@ -877,7 +849,6 @@ function extractPlaylistUrlFromHtml(html, baseUrl) {
       try {
         decoded = decodeURIComponent(value);
       } catch {
-        // Keep original value
       }
 
       if (/\.m3u8(?:[?#].*)?$/i.test(decoded) || decoded.includes('.m3u8')) {
@@ -890,7 +861,6 @@ function extractPlaylistUrlFromHtml(html, baseUrl) {
     try {
       return resolveUrl(candidate, baseUrl);
     } catch {
-      // Keep trying
     }
   }
 
@@ -1039,11 +1009,7 @@ function resolveUrl(url, baseUrl) {
   }
 }
 
-/**
- * Triggers download of a blob with a filename
- * @param {Blob} blob - The blob to download
- * @param {string} filename - Suggested filename
- */
+
 function triggerBlobDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1053,6 +1019,5 @@ function triggerBlobDownload(blob, filename) {
   a.click();
   document.body.removeChild(a);
 
-  // Clean up the object URL after a delay
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }

@@ -395,7 +395,7 @@ function formatSpeed(bytesPerSecond) {
 
 async function scanForVideos() {
   showState('loading');
-  console.log('Starting video scan...');
+  console.log('Starting video scan');
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
