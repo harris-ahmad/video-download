@@ -25,7 +25,6 @@ const statsSelectedEl = document.getElementById('stats-selected');
 let networkRefreshInterval = null;
 let networkHidden = false;
 
-// Batch download state
 const selectedVideos = new Set();
 let allVideos = [];
 
@@ -100,7 +99,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadNetworkMonitor();
   });
 
-  // Batch download controls
   document.getElementById('select-all-btn').addEventListener('click', selectAllVideos);
   document.getElementById('deselect-all-btn').addEventListener('click', deselectAllVideos);
   document.getElementById('download-selected-btn').addEventListener('click', downloadSelectedVideos);
@@ -206,9 +204,7 @@ function buildHlsDownloadFilename(manifestUrl, segmentType = 'unknown') {
   return `${withoutKnownVideoSuffix}${extension}`;
 }
 
-/**
- * Main function to scan for videos from both content script and background
- */
+
 function switchTab(tabName) {
   tabButtons.forEach(btn => {
     if (btn.dataset.tab === tabName) {
@@ -557,7 +553,6 @@ function mergeVideos(contentVideos, networkVideos) {
   });
 
   networkVideos.forEach(video => {
-    // Filter out audio files - they should only appear in Network Monitor
     const enriched = { ...video, sourceKind: 'network' };
     if (!videoMap.has(enriched.src) && passesFilters(enriched) && !isAudioUrl(enriched.src) && shouldDisplayVideoCard(enriched)) {
       videoMap.set(enriched.src, enriched);
@@ -579,9 +574,6 @@ function passesFilters(video) {
   return true;
 }
 
-/**
- * Creates and displays video cards in the UI
- */
 function displayVideos(videos) {
   videoListEl.innerHTML = '';
   allVideos = videos;
@@ -620,15 +612,12 @@ function updateVideoStats(totalCount = 0, selectedCount = 0) {
   }
 }
 
-/**
- * Creates a single video card element
- */
+
 function createVideoCard(video, index) {
   const card = document.createElement('div');
   card.className = 'video-card';
   card.dataset.videoSrc = video.src;
 
-  // Checkbox for batch selection
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.className = 'video-checkbox';
@@ -645,7 +634,6 @@ function createVideoCard(video, index) {
   });
   card.appendChild(checkbox);
 
-  // Thumbnail
   if (video.thumbnail) {
     const thumbnailDiv = document.createElement('div');
     thumbnailDiv.className = 'video-thumbnail';
@@ -658,16 +646,12 @@ function createVideoCard(video, index) {
     card.appendChild(thumbnailDiv);
   }
 
-  // Type badge
   const badge = document.createElement('span');
   badge.className = `type-badge type-${video.type}`;
   badge.textContent = video.type.toUpperCase();
-
-  // Video info container
   const infoDiv = document.createElement('div');
   infoDiv.className = 'video-info';
 
-  // Resolution
   const resolutionDiv = document.createElement('div');
   resolutionDiv.className = 'video-meta';
   if (video.width && video.height) {
@@ -676,7 +660,6 @@ function createVideoCard(video, index) {
     resolutionDiv.textContent = '📐 Unknown';
   }
 
-  // Duration
   const durationDiv = document.createElement('div');
   durationDiv.className = 'video-meta';
   if (video.duration) {
@@ -719,8 +702,8 @@ function createVideoCard(video, index) {
   const subtitleStatus = document.createElement('span');
   subtitleStatus.className = `subtitle-status ${effectiveSubtitleTracks.length > 0 ? 'available' : 'unavailable'}`;
   subtitleStatus.textContent = effectiveSubtitleTracks.length > 0
-    ? `📝 Subtitles available (${effectiveSubtitleTracks.length})`
-    : '📝 No subtitles found';
+    ? `Subtitles available (${effectiveSubtitleTracks.length})`
+    : 'No subtitles found';
 
   subtitleRow.appendChild(subtitleStatus);
 
@@ -806,7 +789,6 @@ function createVideoCard(video, index) {
 
   const downloadBtn = createDownloadButton(video);
 
-  // Assemble card
   card.appendChild(badge);
   card.appendChild(infoDiv);
   card.appendChild(downloadBtn);
@@ -814,20 +796,14 @@ function createVideoCard(video, index) {
   return card;
 }
 
-/**
- * Creates download button with appropriate behavior based on video type
- */
 function createDownloadButton(video) {
   const btn = document.createElement('button');
   btn.className = 'download-btn';
 
-  // Handle different video types
   if (video.type === 'hls') {
-    // HLS download - fetch and concatenate segments
     btn.textContent = 'Download';
     btn.addEventListener('click', () => downloadHLSVideo(video.src, btn, false, video.subtitleTracks || []));
   } else if (video.type === 'dash') {
-    // DASH download - fetch and concatenate segments
     btn.textContent = 'Download';
     btn.addEventListener('click', () => downloadDASHVideo(video.src, btn, false, video.subtitleTracks || []));
   } else if (video.type === 'blob') {
@@ -837,7 +813,6 @@ function createDownloadButton(video) {
     }
     btn.addEventListener('click', () => downloadBlob(video.src, btn, video));
   } else {
-    // Direct download for mp4, webm, ogg, mov, unknown
     btn.textContent = 'Download';
     btn.addEventListener('click', () => downloadDirect(video.src, btn, false, video.subtitleTracks || []));
   }
@@ -877,7 +852,6 @@ async function syncCaptionRecorderButtonState(button) {
       setCaptionRecorderButtonState(button, Boolean(response.active));
     }
   } catch {
-    // The content script may not be ready yet; keep the default button label.
   }
 }
 
@@ -924,14 +898,14 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
         saveAs: batchMode ? false : settings.saveAs
       });
       await downloadSubtitleCompanion(video?.src || blobUrl, video?.subtitleTracks || [], button, batchMode);
-      if (button) button.textContent = '✓ Done';
+      if (button) button.textContent = 'Done';
     } else {
       throw new Error(response.error);
     }
   } catch (error) {
     console.error('Blob download error:', error);
     if (button) {
-      button.textContent = '✗ Expired';
+      button.textContent = 'Expired';
       button.className = 'download-btn error';
     }
 
@@ -1075,7 +1049,7 @@ function prioritizeBlobCandidates(candidates) {
 
 async function downloadDirect(url, button, batchMode = false, subtitleTracks = []) {
   if (button) {
-    button.textContent = 'Starting...';
+    button.textContent = 'Starting';
     button.disabled = true;
   }
 
@@ -1089,13 +1063,13 @@ async function downloadDirect(url, button, batchMode = false, subtitleTracks = [
     });
 
     if (response.downloadId) {
-      if (button) button.textContent = '✓ Queued';
+      if (button) button.textContent = 'Queued';
       await downloadSubtitleCompanion(url, subtitleTracks, button, batchMode);
     }
   } catch (error) {
     console.error('Download error:', error);
     if (button) {
-      button.textContent = '✗ Failed';
+      button.textContent = 'Failed';
       button.className = 'download-btn error';
     }
     throw error;
@@ -1112,7 +1086,7 @@ async function downloadDirect(url, button, batchMode = false, subtitleTracks = [
 
 async function downloadHLSVideo(manifestUrl, button, batchMode = false, subtitleTracks = []) {
   if (button) {
-    button.textContent = 'Loading...';
+    button.textContent = 'Loading';
     button.disabled = true;
   }
 
@@ -1126,7 +1100,6 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false, subtitle
     }
 
     if (batchMode) {
-      // In batch mode, auto-select best quality
       const selectedVariant = preferStableHLSVariant(variants, selectQualityByPreference(variants, 'best'));
       return await startHLSDownload(selectedVariant, manifestUrl, button, batchMode, hlsOptions);
     } else if (settings.defaultQuality === 'ask' || variants.length === 1) {
@@ -1225,7 +1198,7 @@ function preferStableHLSVariant(variants, selectedVariant) {
 
 async function startHLSDownload(variant, manifestUrl, button, batchMode = false, hlsOptions = null, subtitleTracks = []) {
   if (button) {
-    button.textContent = 'Downloading...';
+    button.textContent = 'Downloading';
     button.disabled = true;
   }
 
@@ -1237,14 +1210,14 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
 
   try {
     const effectiveOptions = hlsOptions || await buildHLSDownloadOptions();
-    console.log('[startHLSDownload] Calling startHLSDownloadInPage with variant.url:', variant.url);
+    console.log('Calling startHLSDownloadInPage with variant.url:', variant.url);
     await startHLSDownloadInPage(variant.url, manifestUrl, effectiveOptions);
 
-    console.log('[startHLSDownload] Success, setting button to Started');
-    if (button) button.textContent = '✓ Started';
+    console.log('Success, setting button to Started');
+    if (button) button.textContent = 'Started';
     await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode, effectiveOptions);
   } catch (error) {
-    console.warn('[startHLSDownload] Persistent HLS download failed, trying fallback:', error);
+    console.warn('Persistent HLS download failed, trying fallback:', error);
 
     let fallbackTaskId = null;
 
@@ -1263,7 +1236,7 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
       let lastProgressSentAt = 0;
       let lastTotalSegments = 0;
 
-      console.log('[startHLSDownload] Fallback: downloading in popup context');
+      console.log('Fallback: downloading in popup context');
       const videoBlob = await downloadHLSWithQuality(variant.url, (current, total, status) => {
         if (Number.isFinite(Number(total)) && Number(total) >= 0) {
           lastTotalSegments = Number(total);
@@ -1284,9 +1257,9 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
 
         if (button) {
           if (status === 'Finalizing TS') {
-            button.textContent = 'Finalizing TS...';
+            button.textContent = 'Finalizing TS';
           } else {
-            button.textContent = 'Downloading...';
+            button.textContent = 'Downloading';
           }
         }
       }, effectiveOptions);
@@ -1299,9 +1272,9 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
         totalSegments: lastTotalSegments,
         statusText: 'Saved to Downloads'
       });
-      if (button) button.textContent = '✓ Done';
+      if (button) button.textContent = 'Done';
     } catch (fallbackError) {
-      console.error('[startHLSDownload] Download failed:', fallbackError);
+      console.error('Download failed:', fallbackError);
 
       if (fallbackTaskId) {
         chrome.runtime.sendMessage({
@@ -1322,8 +1295,6 @@ async function startHLSDownload(variant, manifestUrl, button, batchMode = false,
     }
   } finally {
     if (button) {
-      // Only reset if it failed (error state)
-      // Don't reset on success—let "✓ Started" or "✓ Done" remain visible
       if (button.className === 'download-btn error') {
         setTimeout(() => {
           button.textContent = 'Download';
@@ -1528,7 +1499,6 @@ async function fetchYouTubeTranscriptText(url, options = {}) {
           return lines.join('\n');
         }
       } catch {
-        // Try the next format.
       }
       continue;
     }
@@ -1718,7 +1688,6 @@ function extractSubtitleTextFallback(text) {
         }
       }
     } catch {
-      // Fall through to the generic cleanup below.
     }
   }
 
@@ -1783,8 +1752,6 @@ function createHLSTextFetcher(tabId) {
 
       if (nativeResponse.ok) {
         nativeText = await nativeResponse.text();
-        
-        // Validate that we got actual M3U8, not HTML
         if (nativeText && nativeText.trim().startsWith('#EXTM3U')) {
           console.log('Native HLS playlist fetch successful, using native response');
           return new Response(nativeText, {
@@ -1795,7 +1762,6 @@ function createHLSTextFetcher(tabId) {
           });
         }
         
-        // Got 200 OK but content is not M3U8 (probably HTML redirect/error page)
         console.warn('Native fetch returned 200 OK but content is HTML/not M3U8:', nativeText?.substring(0, 100));
       }
     } catch (error) {
@@ -1923,13 +1889,10 @@ function showHLSError(error) {
   alert(`HLS download failed: ${error?.message || 'Unknown error'}`);
 }
 
-/**
- * Downloads a DASH video (mpd) by fetching and concatenating segments
- */
 async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitleTracks = []) {
   const originalText = button ? button.textContent : '';
   if (button) {
-    button.textContent = 'Preparing...';
+    button.textContent = 'Preparing';
     button.disabled = true;
   }
 
@@ -1937,7 +1900,7 @@ async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitl
     const videoBlob = await downloadDASH(manifestUrl, (current, total, status) => {
       if (button) {
         if (status === 'Muxing MP4') {
-          button.textContent = 'Muxing MP4...';
+          button.textContent = 'Muxing MP4';
         } else if (status === 'Downloading video') {
           button.textContent = `Video ${current}/${total}`;
         } else if (status === 'Downloading audio') {
@@ -1952,11 +1915,11 @@ async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitl
     triggerBlobDownload(videoBlob, filename);
     await downloadSubtitleCompanion(manifestUrl, subtitleTracks, button, batchMode);
 
-    if (button) button.textContent = '✓ Downloaded';
+    if (button) button.textContent = 'Downloaded';
   } catch (error) {
     console.error('DASH download error:', error);
     if (button) {
-      button.textContent = '✗ Failed';
+      button.textContent = 'Failed';
       button.className = 'download-btn error';
     }
     if (!batchMode) {
@@ -2033,17 +1996,13 @@ function generateFilename(url, fallback) {
       return lastPart;
     }
   } catch (error) {
-    // Invalid URL, use fallback
   }
 
-  // Generate timestamped filename
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   return `${fallback}-${timestamp}.mp4`;
 }
 
-/**
- * Formats duration in seconds to mm:ss
- */
+
 function formatDuration(seconds) {
   if (!seconds || !isFinite(seconds)) return 'Unknown';
 
@@ -2052,9 +2011,6 @@ function formatDuration(seconds) {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-/**
- * Truncates URL to last 60 characters
- */
 function truncateUrl(url) {
   if (url.length <= 60) return url;
   return '...' + url.slice(-60);
@@ -2120,9 +2076,9 @@ async function updateQueueDisplay() {
         const speedRow = document.createElement('div');
         speedRow.className = 'video-meta';
         if (item.progressUnit === 'segments') {
-          speedRow.textContent = `🎞️ ${item.progress || 0}/${item.total || 0} segments${item.statusText ? ` • ${item.statusText}` : ''}`;
+          speedRow.textContent = `${item.progress || 0}/${item.total || 0} segments${item.statusText ? ` • ${item.statusText}` : ''}`;
         } else {
-          speedRow.textContent = `🚀 ${formatSpeed(item.speedBps)}${item.total > 0 ? ` • ${formatFileSize(item.progress)} / ${formatFileSize(item.total)}` : ''}`;
+          speedRow.textContent = `${formatSpeed(item.speedBps)}${item.total > 0 ? ` • ${formatFileSize(item.progress)} / ${formatFileSize(item.total)}` : ''}`;
         }
         queueItem.appendChild(speedRow);
       } else if (item.statusText) {
@@ -2152,9 +2108,7 @@ async function updateQueueDisplay() {
   }
 }
 
-/**
- * Batch Download Functions
- */
+
 
 function selectAllVideos() {
   const checkboxes = document.querySelectorAll('.video-checkbox');
@@ -2185,7 +2139,6 @@ function updateBatchControls() {
   const selectedCountEl = document.getElementById('selected-count');
   const downloadSelectedBtn = document.getElementById('download-selected-btn');
 
-  // Check if elements exist (they might be temporarily removed during download)
   if (selectedCountEl) {
     selectedCountEl.textContent = selectedVideos.size;
   }
@@ -2221,7 +2174,6 @@ async function downloadSelectedVideos() {
     const remaining = selectedVideoObjs.length - i;
 
     try {
-      // Show what's happening
       if (video.type === 'blob' && !video.blobCaptured) {
         downloadBtn.innerHTML = `Capturing blob... (<span id="selected-count">${remaining}</span> left)`;
       } else if (video.type === 'hls' || video.type === 'dash') {
@@ -2237,13 +2189,11 @@ async function downloadSelectedVideos() {
       failed++;
     }
 
-    // Small delay between downloads to avoid overwhelming the system
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  // Show completion message
   if (failed === 0) {
-    downloadBtn.innerHTML = `✓ Downloaded ${completed}`;
+    downloadBtn.innerHTML = `Downloaded ${completed}`;
     setTimeout(() => {
       downloadBtn.innerHTML = originalText;
       downloadBtn.disabled = false;
@@ -2256,7 +2206,6 @@ async function downloadSelectedVideos() {
     }, 3000);
   }
 
-  // Deselect all after batch download
   deselectAllVideos();
 }
 
