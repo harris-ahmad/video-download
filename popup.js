@@ -127,36 +127,10 @@ async function convertLatestTsToMp4(options = {}) {
     }
 
     if (!silent) {
-      alert(`MP4 conversion completed successfully.\n\nOutput:\n${response.outputPath}`);
+      alert(`MP4 conversion completed successfully (ffmpeg.wasm).\n\nOutput:\n${response.outputPath}`);
     }
   } catch (error) {
     const message = String(error?.message || error);
-
-    if (message.includes('Specified native messaging host not found')) {
-      if (!silent) {
-        alert(
-          'Native helper is not installed yet.\n\n' +
-          'Install it once, then conversion is one-click:\n' +
-          '1) Open project terminal\n' +
-          '2) Run: npm run native:install:macos -- <your-extension-id>\n\n' +
-          'Find extension ID at chrome://extensions (Developer mode).'
-        );
-      }
-      return;
-    }
-
-    if (message.includes('Native host has exited')) {
-      if (!silent) {
-        alert(
-          'Native helper started but exited before responding.\n\n' +
-          'Please reinstall the helper launcher and reload the extension:\n' +
-          '1) npm run native:install:macos -- <your-extension-id>\n' +
-          '2) Reload extension in chrome://extensions\n\n' +
-          'Also ensure ffmpeg is installed and node is available.'
-        );
-      }
-      return;
-    }
 
     if (!silent) {
       alert(`TS→MP4 conversion failed:\n\n${message}`);

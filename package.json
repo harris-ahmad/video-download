@@ -6,9 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "vendor:update:mux": "node scripts/update-mux.js",
-    "vendor:update:mux:latest": "node scripts/update-mux.js",
-    "native:install:macos": "bash native-helper/install-macos.sh",
-    "native:test": "node native-helper/test-host.js"
+    "vendor:update:mux:latest": "node scripts/update-mux.js"
   },
   "repository": {
     "type": "git",
@@ -24,5 +22,10 @@
   "homepage": "https://github.com/harris-ahmad/video-download#readme",
   "devDependencies": {
     "@types/chrome": "^0.1.40"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2"
   }
 }

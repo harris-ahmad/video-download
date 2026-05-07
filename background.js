@@ -1,6 +1,5 @@
 const networkVideos = new Map();
 const networkRequests = new Map();
-const NATIVE_HELPER_HOST = 'com.harrisahmad.video_download_helper';
 const DOWNLOAD_QUEUE_STORAGE_KEY = 'downloadQueueSnapshot';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 
@@ -163,19 +162,6 @@ let downloadIdCounter = 0;
 let queueHydrationPromise = null;
 let queuePersistTimer = null;
 
-function sendNativeMessage(hostName, message) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendNativeMessage(hostName, message, (response) => {
-            if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-                return;
-            }
-
-            resolve(response || null);
-        });
-    });
-}
-
 async function findLatestDownloadedTs() {
     const downloads = await chrome.downloads.search({
         state: 'complete',
@@ -270,6 +256,20 @@ async function ensureOffscreenDocument(){
         reasons:['BLOBS'],
         justification:'Run media segment downloads outside tab/popup lifetime'
     });
+}
+
+async function convertTsToMp4WithWasm(tsBuffer) {
+    await ensureOffscreenDocument();
+    const response = await chrome.runtime.sendMessage({
+        action: 'offscreenConvertTsToMp4',
+        tsBuffer: tsBuffer
+    });
+
+    if (!response?.success || !(response.mp4Buffer instanceof ArrayBuffer)) {
+        throw new Error(response?.error || 'WASM conversion failed');
+    }
+
+    return response.mp4Buffer;
 }
 
 function buildDownloadSnapshot(download) {
@@ -843,28 +843,39 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     return;
                 }
 
-                const outputPath = getMp4PathForTs(latestTs.filename);
-                const nativeResult = await sendNativeMessage(NATIVE_HELPER_HOST, {
-                    action: 'convertTsToMp4',
-                    inputPath: latestTs.filename,
-                    outputPath: outputPath
-                });
+                const sourceUrl = latestTs.finalUrl || latestTs.url;
+                if (!sourceUrl) {
+                    throw new Error('Could not determine source URL for latest .ts download');
+                }
 
-                if (!nativeResult?.success) {
-                    sendResponse({
-                        success: false,
-                        error: nativeResult?.error || 'Unknown conversion error'
+                const tsFetch = await fetchMediaBlob(sourceUrl);
+                if (!tsFetch.ok || !(tsFetch.buffer instanceof ArrayBuffer) || tsFetch.buffer.byteLength === 0) {
+                    throw new Error(`Failed to fetch TS bytes (${tsFetch.status})`);
+                }
+
+                const mp4Buffer = await convertTsToMp4WithWasm(tsFetch.buffer);
+                const mp4Blob = new Blob([mp4Buffer], { type: 'video/mp4' });
+                const mp4ObjectUrl = URL.createObjectURL(mp4Blob);
+                const outputFilename = latestTs.filename.split('/').pop() || 'converted.mp4';
+                const outputPath = getMp4PathForTs(outputFilename);
+
+                try {
+                    await chrome.downloads.download({
+                        url: mp4ObjectUrl,
+                        filename: outputPath,
+                        saveAs: false
                     });
-                    return;
+                } finally {
+                    setTimeout(() => URL.revokeObjectURL(mp4ObjectUrl), 60_000);
                 }
 
                 sendResponse({
                     success: true,
                     inputPath: latestTs.filename,
-                    outputPath: nativeResult.outputPath || outputPath
+                    outputPath: outputPath
                 });
             } catch (error) {
-                sendResponse({success: false, error: error.message});
+                sendResponse({success: false, error: String(error?.message || error || 'Unknown conversion error')});
             }
         })();
 

@@ -1,27 +1,40 @@
 const runningTasks = new Set();
+let ffmpegInstance = null;
+let ffmpegLoadPromise = null;
 
 chrome.runtime.onMessage.addListener((request,sender,sendResponse)=>{
-  if (request.action!=="offscreenDownloadStream") return;
+  if (request.action==="offscreenDownloadStream") {
+    const taskId = request.taskId;
+    if (!taskId) {
+      sendResponse({accepted:false,error:'taskId is required'});
+      return true;
+    }
 
-  const taskId = request.taskId;
-  if (!taskId) {
-    sendResponse({accepted:false,error:'taskId is required'});
+    if (runningTasks.has(taskId)) {
+      sendResponse({accepted:false,error:'Task already running'});
+      return true;
+    }
+
+    runningTasks.add(taskId);
+    sendResponse({accepted:true,taskId});
+
+    runTask(request).finally(()=>{
+      runningTasks.delete(taskId);
+    });
     return true;
   }
 
-  if (runningTasks.has(taskId)) {
-    sendResponse({accepted:false,error:'Task already running'});
+  if (request.action==="offscreenConvertTsToMp4") {
+    (async()=>{
+      try {
+        const mp4Buffer = await convertTsToMp4Buffer(request.tsBuffer);
+        sendResponse({success:true,mp4Buffer});
+      } catch (error) {
+        sendResponse({success:false,error:String(error?.message || error || 'Conversion failed')});
+      }
+    })();
     return true;
   }
-
-  runningTasks.add(taskId);
-  sendResponse({accepted:true,taskId});
-
-  runTask(request).finally(()=>{
-    runningTasks.delete(taskId);
-  });
-
-  return true;
 });
 
 async function runTask(request){
@@ -104,4 +117,53 @@ async function reportFailed(taskId,error){
       error:error
     });
   } catch {}
+}
+
+async function ensureFfmpegLoaded(){
+  if (ffmpegInstance?.loaded) {
+    return ffmpegInstance;
+  }
+
+  if (!ffmpegLoadPromise) {
+    ffmpegLoadPromise=(async()=>{
+      if (!globalThis.FFmpegWASM?.FFmpeg) {
+        throw new Error('ffmpeg.wasm runtime is not available');
+      }
+      const ffmpeg = new globalThis.FFmpegWASM.FFmpeg();
+      await ffmpeg.load({
+        coreURL: chrome.runtime.getURL('node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js'),
+        wasmURL: chrome.runtime.getURL('node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm')
+      });
+      ffmpegInstance = ffmpeg;
+      return ffmpeg;
+    })().catch((error)=>{
+      ffmpegLoadPromise = null;
+      throw error;
+    });
+  }
+
+  return ffmpegLoadPromise;
+}
+
+async function convertTsToMp4Buffer(tsBuffer){
+  if (!(tsBuffer instanceof ArrayBuffer)) {
+    throw new Error('Missing TS data buffer');
+  }
+
+  const ffmpeg = await ensureFfmpegLoaded();
+  const inputFile=`input-${Date.now()}.ts`;
+  const outputFile=`output-${Date.now()}.mp4`;
+
+  try {
+    await ffmpeg.writeFile(inputFile,new Uint8Array(tsBuffer));
+    await ffmpeg.exec(['-i',inputFile,'-c','copy',outputFile]);
+    const outputData = await ffmpeg.readFile(outputFile);
+    if (!(outputData instanceof Uint8Array) || outputData.length===0) {
+      throw new Error('ffmpeg produced empty output');
+    }
+    return outputData.buffer.slice(outputData.byteOffset,outputData.byteOffset + outputData.byteLength);
+  } finally {
+    try { await ffmpeg.deleteFile(inputFile); } catch {}
+    try { await ffmpeg.deleteFile(outputFile); } catch {}
+  }
 }
