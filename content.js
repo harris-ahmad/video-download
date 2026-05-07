@@ -9,7 +9,6 @@ const captionRecorderState = {
     intervalId: null
 };
 
-// Clear caches when navigating to a new page
 function clearCaches() {
   blobDataCache.clear();
   dynamicVideosCache = [];
@@ -17,7 +16,6 @@ function clearCaches() {
   console.log('Video caches cleared due to navigation');
 }
 
-// Detect navigation and clear caches
 function checkForNavigation() {
   if (location.href !== currentUrl) {
     console.log('Navigation detected:', currentUrl, '->', location.href);
@@ -26,35 +24,29 @@ function checkForNavigation() {
   }
 }
 
-// Check for navigation every 500ms (for SPAs like YouTube)
 setInterval(checkForNavigation, 500);
 
-// Also clear on page show (handles back/forward navigation)
 window.addEventListener('pageshow', () => {
   checkForNavigation();
 });
 
-// Check if current page is YouTube homepage or feed
 function isYouTubeHomepage() {
   const url = location.href;
   const hostname = location.hostname;
 
-  // Check if it's YouTube domain
   if (!hostname.includes('youtube.com')) {
     return false;
   }
 
-  // Homepage patterns
   const homepagePatterns = [
-    /^https?:\/\/(www\.)?youtube\.com\/?$/,           // youtube.com or youtube.com/
-    /^https?:\/\/(www\.)?youtube\.com\/feed/,         // youtube.com/feed/*
-    /^https?:\/\/(www\.)?youtube\.com\/\?/,           // youtube.com/?...
-    /^https?:\/\/(www\.)?youtube\.com\/#/,            // youtube.com/#...
-    /^https?:\/\/(www\.)?youtube\.com\/results/,      // youtube.com/results (search results)
-    /^https?:\/\/(www\.)?youtube\.com\/trending/,     // youtube.com/trending
+    /^https?:\/\/(www\.)?youtube\.com\/?$/,          
+    /^https?:\/\/(www\.)?youtube\.com\/feed/,         
+    /^https?:\/\/(www\.)?youtube\.com\/\?/,           
+    /^https?:\/\/(www\.)?youtube\.com\/#/,            
+    /^https?:\/\/(www\.)?youtube\.com\/results/,     
+    /^https?:\/\/(www\.)?youtube\.com\/trending/,     
   ];
 
-  // If URL matches any homepage pattern, return true
   for (const pattern of homepagePatterns) {
     if (pattern.test(url)) {
       console.log('[Video Filter] On homepage/feed - filtering enabled');
@@ -62,14 +54,12 @@ function isYouTubeHomepage() {
     }
   }
 
-  // Check if on video watch page (watch page should always allow all videos)
   const isWatchPage = url.includes('/watch');
   if (isWatchPage) {
     console.log('[Video Filter] On watch page - showing all videos');
     return false;
   }
 
-  // Other YouTube pages (channels, playlists, etc.) - enable filtering
   console.log('[Video Filter] On other YouTube page - filtering enabled');
   return true;
 }
@@ -114,7 +104,6 @@ function detectVideos() {
                   }
               }
           } catch (e) {
-              // Cross-origin iframe, can't access
           }
       });
   }
@@ -164,10 +153,9 @@ function detectVideos() {
 
       const duration = videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null;
 
-      // Filter short preview videos on homepage/feed pages only
       const isHomepageOrFeed = isYouTubeHomepage();
       if (isHomepageOrFeed && duration !== null && duration < 15) {
-          console.log('Skipping short preview video on homepage:', url, 'duration:', duration);
+          console.log('skipping short preview video on homepage:', url, 'duration:', duration);
           return;
       }
 
@@ -238,7 +226,6 @@ function setupDynamicObserver() {
                                   iframeVideos.forEach(video => handleNewVideo(video));
                               }
                           } catch (e) {
-                              // Cross-origin
                           }
                       }, 1000);
                   }
@@ -275,7 +262,6 @@ function setupDynamicObserver() {
           if (!dynamicVideosCache.some(v => v.src === url)) {
               const duration = videoElement.duration && isFinite(videoElement.duration) ? videoElement.duration : null;
 
-              // Filter short preview videos on homepage/feed pages only
               const isHomepageOrFeed = isYouTubeHomepage();
               if (isHomepageOrFeed && duration !== null && duration < 15) {
                   console.log('Skipping short preview video on homepage:', url, 'duration:', duration);
@@ -435,7 +421,6 @@ async function captureFromVideoElement(videoElement, options = {}) {
                           await seekVideo(videoElement, originalCurrentTime).catch(() => {});
                       }
                   } catch {
-                      // Ignore restore failures
                   }
 
                   const blob = new Blob(chunks, { type: mimeType });
@@ -1315,11 +1300,9 @@ async function forceCaptureBlob(blobUrl, recordFromStart = false, duration = 30)
 async function fetchMediaText(url) {
     const result = await fetchMediaResource(url, 'text');
     
-    // If we got text content, validate it's not HTML (error page)
     if (result.ok && result.text) {
         const trimmedText = result.text.trim();
         if (trimmedText.startsWith('<') || trimmedText.includes('<!DOCTYPE')) {
-            // Got HTML instead of expected content, treat as failure
             console.warn('fetchMediaText got HTML instead of text content:', trimmedText.substring(0, 100));
             return {
                 ok: false,
