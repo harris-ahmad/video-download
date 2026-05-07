@@ -153,6 +153,22 @@ async function startBackgroundStreamDownload(payload){
   return response;
 }
 
+async function ensureVideoDownloaderInjected(){
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    throw new Error('No active tab found');
+  }
+
+  if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
+    throw new Error('Cannot inject downloader script on this page');
+  }
+
+  await chrome.scripting.executeScript({
+    target:{tabId:tab.id},
+    files:['video-downloader.js']
+  });
+}
+
 function buildHlsDownloadFilename(manifestUrl, segmentType = 'unknown') {
   const raw = String(generateFilename(manifestUrl, 'hls-video') || '').trim() || `hls-video-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const withoutKnownVideoSuffix = raw.replace(/\.(mp4|ts|m3u8|mpd|webm|mov)$/i, '');
@@ -1055,6 +1071,7 @@ async function downloadHLSVideo(manifestUrl, button, batchMode = false, subtitle
   }
 
   try {
+    await ensureVideoDownloaderInjected();
     const hlsOptions = await buildHLSDownloadOptions();
     const variants = await getHLSVariants(manifestUrl, hlsOptions);
 
@@ -1801,6 +1818,7 @@ async function downloadDASHVideo(manifestUrl, button, batchMode = false, subtitl
   }
 
   try {
+    await ensureVideoDownloaderInjected();
     const taskId=`dash-bg-${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
     const filename=generateFilename(manifestUrl,'dash-video') + '.mp4';
     await startBackgroundStreamDownload({
