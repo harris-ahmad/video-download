@@ -24,6 +24,7 @@ const statsSelectedEl = document.getElementById('stats-selected');
 
 let networkRefreshInterval = null;
 let networkHidden = false;
+let blobCaptureNoticeShown = false;
 
 const selectedVideos = new Set();
 let allVideos = [];
@@ -837,7 +838,15 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
     }
 
     if (button) {
-      button.textContent = 'Capturing fallback...';
+      button.textContent = 'Keep video playing...';
+    }
+
+    if (!batchMode && !blobCaptureNoticeShown) {
+      blobCaptureNoticeShown = true;
+      alert(
+        'Blob capture needs the source tab to stay open and the video to keep playing.\n\n' +
+        'Do not pause or navigate away until capture completes.'
+      );
     }
 
     const response = await chrome.tabs.sendMessage(tab.id, {
@@ -865,7 +874,7 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
     }
 
     if (!batchMode) {
-      let errorMsg = 'Blob URL has expired.\n\n';
+      let errorMsg = 'Blob capture failed.\n\n';
 
       if (video && !video.blobCaptured) {
         errorMsg += 'This appears to be a player-managed stream.\n\n';
@@ -873,7 +882,7 @@ async function downloadBlob(blobUrl, button, video, batchMode = false) {
 
       errorMsg += 'Tips:\n';
       errorMsg += '• Refresh the page and try downloading immediately\n';
-      errorMsg += '• Keep the video playing when fallback capture starts\n';
+      errorMsg += '• Keep the source tab open and keep the video playing during capture\n';
       errorMsg += '• Try right-clicking the video → "Save video as"\n';
       errorMsg += '• Some sites intentionally block blob downloads';
 

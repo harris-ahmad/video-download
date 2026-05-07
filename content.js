@@ -370,10 +370,10 @@ async function captureBlobData(blobUrl, videoElement) {
 
       if (videoElement) {
           try {
-              const duration = getRecommendedCaptureDuration(videoElement, true);
+              const duration = getRecommendedCaptureDuration(videoElement, false);
               return await captureFromVideoElement(videoElement, {
                   recordSeconds: duration,
-                  recordFromStart: true
+                  recordFromStart: false
               });
           } catch (altError) {
               console.error('Alternative capture also failed:', altError);
@@ -389,18 +389,15 @@ async function captureFromVideoElement(videoElement, options = {}) {
       throw new Error('captureStream not supported');
   }
 
+  if (videoElement.paused || videoElement.ended) {
+      throw new Error('Blob capture requires the video to stay open and actively playing');
+  }
+
   const recordSeconds = Math.max(1, Math.floor(options.recordSeconds || 30));
-  const recordFromStart = options.recordFromStart !== false;
 
   return new Promise((resolve, reject) => {
       try {
-          let originalCurrentTime = videoElement.currentTime;
-
           const startRecording = async () => {
-              if (recordFromStart && videoElement.currentTime > 0) {
-                  await seekVideo(videoElement, 0);
-              }
-
               const stream = videoElement.captureStream();
               const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
                   ? 'video/webm;codecs=vp9,opus'
@@ -416,13 +413,10 @@ async function captureFromVideoElement(videoElement, options = {}) {
               };
 
               mediaRecorder.onstop = async () => {
-                  try {
-                      if (recordFromStart && Number.isFinite(originalCurrentTime) && originalCurrentTime > 0) {
-                          await seekVideo(videoElement, originalCurrentTime).catch(() => {});
-                      }
-                  } catch {
+                  if (chunks.length===0) {
+                      reject(new Error('No blob data captured. Keep the tab open and keep the video playing.'));
+                      return;
                   }
-
                   const blob = new Blob(chunks, { type: mimeType });
                   const reader = new FileReader();
                   reader.onloadend = () => resolve(reader.result);
@@ -435,10 +429,6 @@ async function captureFromVideoElement(videoElement, options = {}) {
               };
 
               mediaRecorder.start(1000);
-
-              if (videoElement.paused) {
-                  videoElement.play().catch(() => {});
-              }
 
               const recordDuration = recordSeconds * 1000;
 
@@ -467,41 +457,6 @@ function getRecommendedCaptureDuration(videoElement, recordFromStart = true) {
   }
 
   return 60;
-}
-
-function seekVideo(videoElement, targetTime, timeoutMs = 5000) {
-  return new Promise((resolve, reject) => {
-      const done = () => {
-          cleanup();
-          resolve();
-      };
-
-      const onError = () => {
-          cleanup();
-          reject(new Error('Video seek failed'));
-      };
-
-      const cleanup = () => {
-          clearTimeout(timeout);
-          videoElement.removeEventListener('seeked', done);
-          videoElement.removeEventListener('error', onError);
-      };
-
-      const timeout = setTimeout(() => {
-          cleanup();
-          reject(new Error('Video seek timeout'));
-      }, timeoutMs);
-
-      videoElement.addEventListener('seeked', done, { once: true });
-      videoElement.addEventListener('error', onError, { once: true });
-
-      try {
-          videoElement.currentTime = Math.max(0, targetTime);
-      } catch (error) {
-          cleanup();
-          reject(error);
-      }
-  });
 }
 
 async function downloadBlob(blobUrl) {
